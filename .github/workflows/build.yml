@@ -49,7 +49,9 @@ jobs:
           OVERRIDE='${{ inputs.source_sha }}'
           [ -n "$OVERRIDE" ] && PONWRT_SHA="$OVERRIDE"
           for v in PONWRT_URL PONWRT_SHA PON_DRIVERS_URL PON_DRIVERS_SHA \
-                   PON_USERSPACE_URL PON_USERSPACE_SHA LUCI_APP_URL LUCI_APP_SHA; do
+                   PON_USERSPACE_URL PON_USERSPACE_SHA LUCI_APP_URL LUCI_APP_SHA \
+                   THEME_URL THEME_SHA; do
+            [ -n "${!v:-}" ] || { echo "::error::pins.env 缺 $v"; exit 1; }
             echo "$v=${!v}" >> "$GITHUB_ENV"
           done
           echo "基座      : $PONWRT_URL @ $PONWRT_SHA"
@@ -158,6 +160,10 @@ jobs:
           cat "$GITHUB_WORKSPACE/ctrl/configs/xg-040g-md.diff.config" >> .config
           echo "基座 $(wc -l < configs/an7581.config) 行；差异追加 $(grep -cE '^[A-Z]' "$GITHUB_WORKSPACE/ctrl/configs/xg-040g-md.diff.config") 个符号"
 
+      # ---------- 7b. 预置 honk 的签名 .apk（按 sha256 钉死）----------
+      - name: Fetch honk apks
+        run: bash "$GITHUB_WORKSPACE/ctrl/scripts/fetch-honk-apks.sh" "$WORK/openwrt" "$GITHUB_WORKSPACE/ctrl"
+
       # ---------- 8. defconfig + 硬断言 ----------
       - name: make defconfig
         run: cd "$WORK/openwrt" && make defconfig 2>&1 | tail -5
@@ -183,9 +189,17 @@ jobs:
                    kmod-sched-core kmod-nft-queue; do
             chk "CONFIG_PACKAGE_${p}=y"
           done
-          echo "--- 我们额外加的两个插件 ---"
-          chk 'CONFIG_PACKAGE_luci-app-natmode=y'
-          chk 'CONFIG_PACKAGE_luci-app-pon-status=y'
+          echo "--- 我们额外加的插件 / 主题 / honk 依赖 ---"
+          for p in luci-app-natmode luci-app-pon-status luci-theme-lucent \
+                   libstdcpp kmod-veth v2ray-geoip v2ray-geosite \
+                   kmod-sched-bpf kmod-nfnetlink-queue kmod-nft-core kmod-nf-conntrack; do
+            chk "CONFIG_PACKAGE_${p}=y"
+          done
+          # honk 预置件必须齐：5 个 apk + 首启安装脚本 + 验签公钥
+          N=$(find files/etc/apk/local -name '*.apk' 2>/dev/null | wc -l)
+          [ "$N" -ge 5 ] || { echo "❌ files/etc/apk/local 只有 $N 个 apk（应 ≥5）"; fail=1; }
+          [ -x files/etc/uci-defaults/96-honk-bake ] || { echo "❌ 缺可执行的首启脚本 96-honk-bake"; fail=1; }
+          [ -s files/etc/apk/keys/daeuniverse.pem ] || { echo "❌ 缺 daeuniverse 验签公钥"; fail=1; }
           # 反向检查：这些不该被任何依赖拖进来（拖进来了说明配置漂了）
           for junk in python3 ruby perl; do
             if grep -qxF "CONFIG_PACKAGE_${junk}=y" .config; then

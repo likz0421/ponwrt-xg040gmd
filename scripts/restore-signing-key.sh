@@ -30,10 +30,21 @@ if [ -z "${PONWRT_SIGNING_KEYS:-}" ]; then
 fi
 printf '%s' "$PONWRT_SIGNING_KEYS" | base64 -d | tar xzf - || { echo "::error::密钥还原失败（不是 tar.gz 的 base64？）"; exit 1; }
 chmod 600 private-key.pem key-build 2>/dev/null || true
-for f in private-key.pem public-key.pem; do
-	[ -s "$f" ] || { echo "::error::$f 缺失"; exit 1; }
-done
-openssl ec -in private-key.pem -pubout 2>/dev/null | cmp -s - public-key.pem || {
-	echo "::error::private-key.pem 与 public-key.pem 不配对"; exit 1; }
-echo "✅ 签名密钥已还原，公钥指纹 sha256=$(sha256sum public-key.pem | cut -c1-16)"
-echo "   （两轮构建这个指纹必须相同，apk 源才能跨轮更新）"
+[ -s private-key.pem ] || { echo "::error::private-key.pem 缺失"; exit 1; }
+openssl ec -in private-key.pem -check -noout >/dev/null 2>&1 || {
+	echo "::error::private-key.pem 不是可用的 EC 私钥"; exit 1; }
+# 公钥一律由私钥现场重新导出：不同 OpenSSL 版本导出的 PEM 字节可能不同，
+# 上一轮就是拿本地 3.5 生成的 public-key.pem 和 runner 上 3.0 的输出比文本，
+# 判成"不配对"把构建打红了。真正要保证的是公私钥语义配对，且私钥跨轮不变。
+openssl ec -in private-key.pem -pubout -out public-key.pem.tmp 2>/dev/null
+mv -f public-key.pem.tmp public-key.pem
+if [ -s public-key.pem ] && ! grep -q 'BEGIN PUBLIC KEY' public-key.pem; then
+	echo "::error::public-key.pem 导出失败"; exit 1; fi
+FP=$(sha256sum public-key.pem | cut -c1-16)
+echo "✅ 签名密钥已还原，公钥指纹 sha256=$FP"
+echo "   （两轮构建这个指纹必须一致，apk 源才能跨轮更新；base-files 会把这把"
+echo "     public-key.pem 装进镜像的 /etc/apk/keys/，所以包仓库和固件天然配对）"
+if [ -n "${EXPECTED_KEY_FP:-}" ] && [ "$EXPECTED_KEY_FP" != "$FP" ]; then
+	echo "::warning::公钥指纹与期望值 ${EXPECTED_KEY_FP} 不同 —— 私钥被换过了，"
+	echo "        已发出去的设备将验不过新仓库的包，需要重刷固件。"
+fi

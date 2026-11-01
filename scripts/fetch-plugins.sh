@@ -25,11 +25,25 @@ for p in luci-app-natmode luci-app-pon-status; do
 	echo "✅ 已放置 $p  版本 $(grep -m1 '^PKG_VERSION' "$PKG_DIR/$p/Makefile" | cut -d= -f2)"
 done
 rm -rf "$(dirname "$TMP")"
+# ---- 我写的主题：仓库根目录本身就是包（Makefile 在根，PKG_NAME=luci-theme-lucent）----
+# 目录名必须等于包名（buildroot: PKG_NAME ?= $(notdir ${CURDIR})），否则符号对不上。
+: "${THEME_URL:?未设置 THEME_URL}"
+: "${THEME_SHA:?未设置 THEME_SHA}"
+THEME_DIR="$PKG_DIR/luci-theme-lucent"
+if [ ! -d "$THEME_DIR" ]; then
+	git init -q "$THEME_DIR"
+	git -C "$THEME_DIR" remote add origin "$THEME_URL"
+	git -C "$THEME_DIR" fetch -q --depth 1 origin "$THEME_SHA"
+	git -C "$THEME_DIR" checkout -q FETCH_HEAD
+	[ "$(git -C "$THEME_DIR" rev-parse HEAD)" = "$THEME_SHA" ] || { echo "::error::主题源 SHA 不匹配"; exit 1; }
+	[ -f "$THEME_DIR/Makefile" ] || { echo "::error::主题缺 Makefile"; exit 1; }
+	echo "✅ 主题 luci-theme-lucent @ $(git -C "$THEME_DIR" rev-parse --short HEAD) 版本 $(grep -m1 '^PKG_VERSION' "$THEME_DIR/Makefile" | cut -d= -f2)"
+fi
 # 重建索引：只删 .packageinfo 不够，prepare-tmpinfo 有 scan_unchanged 的 stamp 优化，
 # stamp 还在就跳过扫描，结果索引被删了却没人重建。stamp 必须一起删。
 rm -f tmp/.packageinfo tmp/.targetinfo tmp/info/.scan-packageinfo.stamp tmp/info/.scan-targetinfo.stamp
 make -s prepare-tmpinfo OPENWRT_BUILD= >/dev/null 2>&1 || true
-for p in luci-app-natmode luci-app-pon-status; do
+for p in luci-app-natmode luci-app-pon-status luci-theme-lucent; do
 	grep -qx "Package: $p" tmp/.packageinfo || { echo "::error::$p 没进 tmp/.packageinfo，defconfig 会静默剔除"; exit 1; }
 	echo "✅ 索引确认: $p"
 done
