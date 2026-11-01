@@ -1,21 +1,28 @@
-# ============================================================================
-# honk 预置包清单（构建时下载 + sha256 校验，装进固件的 /etc/apk/local/）
-# 来源：daeuniverse 官方签名 apk 仓库
-#   https://openwrt.daeuniverse.org/25.12/packages/aarch64_cortex-a53/
-#   —— 架构正好等于本固件的 CONFIG_TARGET_ARCH_PACKAGES
-# 版本号钉死：他们 feed 里同名文件被 bump 后 URL 会 404，构建直接失败，
-# 不会出现"以为装了其实没装"。升级 = 改这张表并重新核对 sha256。
-# ============================================================================
-HONK_FEED=https://openwrt.daeuniverse.org/25.12/packages/aarch64_cortex-a53
+# honk 进固件的锁定参数（wrapper 包方案）
+#
+# 为什么不做源码构建：honk 的 eBPF 对象要 nightly Rust + 预编译 bpf-linker +
+# BoringSSL(Go)，且 daeuniverse/openwrt-packages 里没有那套 CI 定义（只有
+# build-vmlinux-btf.yml）；他们的 .apk 又是 ADBd 单文件格式，tar/gzip 解不开，
+# 用构建里的 host apk 解又被 package/utils/lua[host] 编译失败挡住。
+#
+# 所以：做一个真正的 in-tree 包 package/custom/honk，
+#   - 二进制取 honk 官方 release 资产（musl 静态、内嵌 doona），
+#     由 buildroot 自己下载并按 PKG_HASH 校验；
+#   - init / UCI / config.dae 从 daeuniverse 的 feed 源码里按 SHA 取；
+#   - luci-app-honk / luci-lib-daeuniverse 也从同一 feed 按 SHA 取源码，
+#     作为普通 LuCI 包编进来。
+# 结果：honk 是固件里的正常包，进 apk 数据库、可 apk upgrade、依赖齐全。
 
-# 文件名 | sha256
-honk-0.1.0_beta4-r3.apk|596f36e3f3c50eabc755cb1673608ddb0960d19fe29472d24ca316f9d383a035
-luci-app-honk-26.303.60580~1046d3c.apk|99bb8d4e7a300578665416f373971004e98c00ce16dd51a03854841780c9736e
-luci-lib-daeuniverse-26.303.64947~503cdb1.apk|120881d8207c66176f92b491abaf00658189545fa1bf063e922b09a60763c009
-luci-i18n-daeuniverse-zh-cn-26.303.60580~1046d3c.apk|6ec3833b8a0651e4f0a6d9645bfe5a5afe4ecc992b4fdb4e7ea2ce966a69d9cd
-vmlinux-btf-builtin-1-r1.apk|568e61ed1e19c2b290fbc8d80809ce86a160bac1f703907c9443283f332376dc
+HONK_VERSION=0.1.0-beta.4
+HONK_ASSET=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
+HONK_URL=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.4/honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
+# 与 release 附带的 SHA256SUMS 逐字核对过（不是只信我自己下载后算的那次）
+HONK_SHA256=121c94f3a30091c5550ae503ddf7bce118def08ddc301a7f8ffa740f956476d0
+HONK_FILE=honk-core            # 资产内的文件名（静态链接 ELF，30.7MB）
 
-# vmlinux-btf-builtin 是"空包 PROVIDES vmlinux-btf"：honk 的 DEPENDS 里写的是
-# +vmlinux-btf（那是给没有内核 BTF 的官方内核准备的 blob），我们开了
-# CONFIG_KERNEL_DEBUG_INFO_BTF，内核自带 /sys/kernel/btf/vmlinux，
-# 按他们 README 的说法就该用这个 builtin 空包满足依赖，不装 blob。
+# 三个包的来源：daeuniverse/openwrt-packages（feed 形态，源码），锁 SHA
+DAEUNIV_URL=https://github.com/daeuniverse/openwrt-packages
+DAEUNIV_SHA=503cdb131c43f727ae0125cfd86ca0f826eef44f
+#   honk/files/{honk.init,honk.config,config.dae}   → 装进 wrapper 包
+#   luci-app-honk/            依赖 +luci-lib-daeuniverse +honk
+#   luci-lib-daeuniverse/     依赖 +luci-base +jshn +flock +coreutils-timeout（含 po/ 中文）

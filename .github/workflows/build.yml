@@ -160,9 +160,10 @@ jobs:
           cat "$GITHUB_WORKSPACE/ctrl/configs/xg-040g-md.diff.config" >> .config
           echo "基座 $(wc -l < configs/an7581.config) 行；差异追加 $(grep -cE '^[A-Z]' "$GITHUB_WORKSPACE/ctrl/configs/xg-040g-md.diff.config") 个符号"
 
-      # ---------- 7b. 预置 honk 的签名 .apk（按 sha256 钉死）----------
-      - name: Fetch honk apks
-        run: bash "$GITHUB_WORKSPACE/ctrl/scripts/fetch-honk-apks.sh" "$WORK/openwrt" "$GITHUB_WORKSPACE/ctrl"
+      # ---------- 7b. honk 进固件：生成 in-tree 包（二进制取官方 release 资产，
+      #      由 buildroot 下载并按 PKG_HASH 校验；LuCI 侧取锁定 SHA 的源码）----------
+      - name: Stage honk packages
+        run: bash "$GITHUB_WORKSPACE/ctrl/scripts/stage-honk.sh" "$WORK/openwrt"
 
       # ---------- 8. defconfig + 硬断言 ----------
       - name: make defconfig
@@ -198,17 +199,16 @@ jobs:
           else
             chk 'CONFIG_PACKAGE_kmod-airoha-en7572=y'
           fi
-          echo "--- 我们额外加的插件 / 主题 / honk 依赖 ---"
+          echo "--- 我们额外加的插件 / 主题 / honk ---"
           for p in luci-app-natmode luci-app-pon-status luci-theme-lucent \
-                   libstdcpp kmod-veth v2ray-geoip v2ray-geosite \
+                   honk luci-app-honk luci-lib-daeuniverse \
+                   kmod-veth v2ray-geoip v2ray-geosite flock coreutils-timeout \
                    kmod-sched-bpf kmod-nfnetlink-queue kmod-nft-core kmod-nf-conntrack; do
             chk "CONFIG_PACKAGE_${p}=y"
           done
-          # honk 是解包进 files/ overlay 的（scripts/bake-honk.sh），
-          # 这里先确认预置件与公钥齐；真正「进没进固件」由后面的 rootfs 断言判。
-          N=$(find files/etc/apk/local -name '*.apk' 2>/dev/null | wc -l)
-          [ "$N" -ge 5 ] || { echo "❌ files/etc/apk/local 只有 $N 个 apk（应 ≥5）"; fail=1; }
-          [ -s files/etc/apk/keys/daeuniverse.pem ] || { echo "❌ 缺 daeuniverse 验签公钥"; fail=1; }
+          # in-tree wrapper 包必须真存在（stage-honk.sh 生成），否则 =y 会被 defconfig 剔除
+          [ -f package/custom/honk/Makefile ] || { echo "❌ 没生成 package/custom/honk/Makefile"; fail=1; }
+          [ -f package/custom/luci-app-honk/Makefile ] || { echo "❌ 缺 package/custom/luci-app-honk"; fail=1; }
           # 反向检查：这些不该被任何依赖拖进来（拖进来了说明配置漂了）
           for junk in python3 ruby perl; do
             if grep -qxF "CONFIG_PACKAGE_${junk}=y" .config; then
@@ -219,16 +219,7 @@ jobs:
           echo "✅ 全部断言通过：$(grep -c '^CONFIG_' .config) 个符号"
 
       # ---------- 9a. 先单独编出 host 的 apk 工具，用它把 honk 解进 files/ ----------
-      - name: Build host apk tool
-        run: |
-          cd "$WORK/openwrt"
-          make package/system/apk/host/compile -j"$(nproc)" 2>&1 | tail -8
-          find staging_dir/host/bin -maxdepth 2 -type f -name apk || { echo "::error::没编出 apk 工具"; exit 1; }
-
-      - name: Bake honk into image
-        run: bash "$GITHUB_WORKSPACE/ctrl/scripts/bake-honk.sh" "$WORK/openwrt"
-
-      # ---------- 9b. 下载 + 编译 ----------
+      # ---------- 9. 下载 + 编译 ----------
       - name: Download packages
         run: |
           cd "$WORK/openwrt"
@@ -278,16 +269,27 @@ jobs:
             exit 1
           fi
           echo "核对 $MAN"
+          # 包列表以 rootfs 的 apk 数据库为准：那才是"镜像里到底装了什么"的权威来源。
+          # manifest 有过两次误判：它是 SoC 级汇总（不含机型专属的 kmod-airoha-en7572），
+          # 且 C++ 运行时在包数据库里叫 libstdc++ 而不是符号名 libstdcpp。
+          ROOTFS=$(find build_dir -maxdepth 1 -type d -name 'root-airoha*' | head -1)
+          DB=""
+          [ -n "$ROOTFS" ] && [ -f "$ROOTFS/lib/apk/db/installed" ] && DB="$ROOTFS/lib/apk/db/installed"
+          [ -n "$DB" ] && echo "以 $DB 为准" || echo "::warning::没有 apk installed 库，退回用 manifest 文本判"
           MISS=""
           for p in kmod-airoha-xpon kmod-airoha-pon-frontend kmod-airoha-en7572 \
                    airoha-pond airoha-ponctl luci-app-pon luci-app-natmode \
                    luci-app-pon-status luci-theme-lucent kmod-nft-fullcone \
-                   kmod-sched-core kmod-nft-queue kmod-nfnetlink-queue \
-                   libstdcpp v2ray-geosite v2ray-geoip; do
-            grep -qE "^${p} - " "$MAN" || MISS="$MISS $p"
+                   kmod-sched-core kmod-nft-queue kmod-nfnetlink-queue kmod-veth \
+                   honk luci-app-honk luci-lib-daeuniverse v2ray-geosite; do
+            if [ -n "$DB" ]; then
+              grep -qE "^P:$p$" "$DB" || MISS="$MISS $p"
+            else
+              grep -qE "^${p} - " "$MAN" || MISS="$MISS $p"
+            fi
           done
           [ -z "$MISS" ] || { echo "::error::成品镜像缺这些包:$MISS"; exit 1; }
-          echo "✅ 成品包列表齐全：$(wc -l < "$MAN") 个包"
+          echo "✅ 成品包列表齐全（判据：${DB:-manifest}）"
           # honk 是解包进 rootfs 的（不是首启安装），直接查镜像装配目录里的实体文件
           MISSBIN=""
           for f in usr/bin/honk-core etc/init.d/honk etc/config/honk etc/honk/config.dae; do
