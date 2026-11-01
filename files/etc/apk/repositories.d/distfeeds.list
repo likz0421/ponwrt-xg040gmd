@@ -1,0 +1,16 @@
+# 覆盖构建生成的 distfeeds.list：本固件不用滚动 snapshot 源。
+#
+# 默认识别到的 ImmortalWrt snapshot 源有三个问题：
+#   1) @pon_drivers / @pon_userspace 两行指向不存在的官方仓库 → apk update 报 404；
+#   2) targets/airoha/an7581/{packages,kmods} 里的 kmod-* 按官方内核 vermagic
+#      编（本固件内核是自己编的，还开了 BTF/FTRACE）→ 装上 modprobe 直接失败；
+#   3) master 是滚动版本，库版本随时会变，和我们锁 SHA 的固件不是同一套 ABI。
+#
+# 要装的东西来自三个确定来源：
+#   @ponwrt      本仓库 Pages（同一次构建产出，密钥固定）→ 固件里所有包 + =m 的可选包
+#   @daeuniverse honk / dae（见 daeuniverse.list）
+#   手工 apk add --allow-untrusted <本地 .apk>（noarch 的 LuCI 包，如 qwe-qaq 的 snapshot Release）
+#
+# 真要临时打开官方源，把注释去掉即可（只建议用于用户态包，不要装它的 kmod-*）：
+# @snapshot-pkg https://downloads.immortalwrt.org/snapshots/packages/aarch64_cortex-a53/packages/packages.adb
+# @snapshot-luci https://downloads.immortalwrt.org/snapshots/packages/aarch64_cortex-a53/luci/packages.adb

@@ -1,0 +1,11 @@
+# daeuniverse 软件源：honk / dae / luci-app-honk
+# 公钥已随镜像提供：/etc/apk/keys/daeuniverse.pem（构建时从上游取的那把 EC P-256）
+#
+# 版本号为什么写死 25.12：
+#   官网给的命令用 $(echo "$DISTRIB_RELEASE" | cut -d. -f1-2) 拼 URL，
+#   而本固件 include/version.mk 里 VERSION_NUMBER 默认是 SNAPSHOT，
+#   拼出来是 .../SNAPSHOT/packages/... → 实测 404。25.12 实测 200。
+# 为什么不写 kmods 行：
+#   .../kmods/25.12/airoha/an7581/packages.adb 实测 404（自定义机型他们不建），
+#   留着只会让 apk update 每次报错。需要内核模块请从 @ponwrt 装。
+@daeuniverse https://openwrt.daeuniverse.org/25.12/packages/aarch64_cortex-a53/packages.adb
