@@ -74,17 +74,25 @@ config KERNEL_DEBUG_INFO_BTF
 4. `public-key.pem` 必须与 `private-key.pem` 配对，并打印指纹（跨轮应一致）
 5. 编完后 `readelf -S vmlinux` 必须能看到 `.BTF` 段
 
-## honk 不进固件（故意的）
+## honk 已编进固件
 
-它是 `v0.1.0-beta.4`，作者自己标 alpha/beta 不建议生产，还会改 TC/cgroup/sysctl、占 NFQUEUE 320。
-装法（源和公钥已预置）：
+构建时用本树编出的 `staging_dir/host/bin/apk` 解 `daeuniverse` 已签名的 `.apk`
+（`.apk` 头是 `ADBd`，tar/gzip 解不了），载荷落进 `files/` overlay，所以镜像里直接有
+`/usr/bin/honk-core`、`/etc/init.d/honk`、`/etc/config/honk`、`/etc/honk/config.dae`
+和 LuCI 页面。版本与 sha256 钉在 `honk-manifest.txt`，他们 bump 后 URL 404 或哈希不符
+都会让构建直接红，不会静默少装。
 
-```sh
-apk update && apk add honk@daeuniverse luci-app-honk@daeuniverse
-ls -l /sys/kernel/btf/vmlinux && mountpoint /sys/fs/bpf
-```
+两点要知道：
 
-出问题回滚：`/etc/init.d/honk stop; apk del honk luci-app-honk`（dropbear 是带外通道，别删）。
+- **服务默认不开**（他们包里就是 disabled by default）。honk 会挂 TC/cgroup `sock_ops`、
+  改 sysctl、占 NFQUEUE 320，所以在 LuCI 里配好节点和分流之前不要启动它 —— 这不是保守，
+  是避免把正在用的网络掐掉。确认 dropbear 能进之后再 `/etc/init.d/honk enable && start`。
+- 因为载荷是解包进 `files/`，apk 数据库里没有 `honk` 条目（`apk info honk` 查不到）。
+  要升级就 `apk update && apk add honk@daeuniverse luci-app-honk@daeuniverse`
+  （源和公钥已随镜像提供），apk 会把同名文件正常接管并登记。
+
+内核前提已满足：构建会断言 `vmlinux` 含 `.BTF`，设备上 `ls /sys/kernel/btf/vmlinux`
+应有文件；`bpffs` 由 base-files 的 `/etc/init.d/boot` 自动挂载。
 注意 `flow_offloading_hw=1`（NPU/PPE 硬件卸载）默认开着——**代理分流若漏走或 NAT 类型不符，
 先把它设 0 做对比**：`uci set firewall.@defaults[0].flow_offloading_hw='0'; /etc/init.d/firewall restart`。
 

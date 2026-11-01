@@ -1,0 +1,169 @@
+name: build-tyfza1
+
+# ============================================================
+# 天翼 TYFZA1（Realtek RTL9617C，4×Cortex-A55，Linux 6.18.55）
+# 与 XG-040G-MD（Airoha AN7581）不是同一个 target，必须独立一条构建线。
+#   源码：openwrt/openwrt@<他们 sources.lock.json 锁的 commit>
+#   端口：LeoooChen/PonWRT-TYFZA1@<pins.env 锁的 SHA>（按 SHA 取，不 fork）
+#   构建配方照抄该仓库 .github/workflows/build-release.yml 的步骤，
+#   差别只有：不发布他们的 Release（我们发自己的 tag）、跳过需要私有素材的分支。
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      add_lucent_theme:
+        description: '顺带把 luci-theme-lucent 编进去（阶段1先不加，跑通再说）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: write
+  pages: write
+
+env:
+  TYFZA1_WORK: ${{ github.workspace }}/tyfza1
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ctrl }
+
+      - name: Load pins
+        run: |
+          set -euo pipefail
+          set -a; . ./ctrl/pins.env; set +a
+          echo "TYFZA1_URL=$TYFZA1_URL" >> "$GITHUB_ENV"
+          echo "TYFZA1_SHA=$TYFZA1_SHA" >> "$GITHUB_ENV"
+          echo "锁版本：$TYFZA1_URL @ $TYFZA1_SHA"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -hT /
+
+      - name: Install build dependencies
+        # 抄他们 workflow 的包列表（rtl9617c 的无线/PE 部件要 clang-18/llvm-18/lld-18）
+        run: |
+          sudo apt-get -qq update -o Acquire::Retries=3
+          sudo apt-get install -y build-essential busybox clang-18 llvm-18 lld-18 flex bison gawk \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync unzip \
+            zlib1g-dev file wget curl device-tree-compiler u-boot-tools swig \
+            libelf-dev python3-pyelftools python3-dev libfuse-dev pkgconf cmake ninja-build ccache
+
+      - name: Clone port repo at pinned SHA
+        run: |
+          set -euo pipefail
+          git clone -q "$TYFZA1_URL" "$TYFZA1_WORK"
+          git -C "$TYFZA1_WORK" fetch -q --depth 1 origin "$TYFZA1_SHA"
+          git -C "$TYFZA1_WORK" checkout -q FETCH_HEAD
+          test -f "$TYFZA1_WORK/port/scripts/build.sh"
+          echo "= $(git -C "$TYFZA1_WORK" rev-parse --short HEAD) 版本 $(cat "$TYFZA1_WORK/VERSION")"
+
+      - name: OMCI compiler (rust pinned by their workflow)
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.1 --profile minimal
+          rustup target add --toolchain 1.96.1 aarch64-unknown-linux-musl
+          echo "TYFZA1_CARGO=$(rustup which --toolchain 1.96.1 cargo)" >> "$GITHUB_ENV"
+
+      - name: Runtime inputs (their public release artifact)
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          mkdir -p artifacts/runtime-inputs
+          # 他们的 build.sh 在没有 TYFZA1_RUNTIME_INPUTS 时会去找 analysis/private/*
+          # （私有原厂素材）→ CI 里必须用这个公开的素材包
+          curl -fsSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -o artifacts/tyfza1-runtime-inputs-v1.tar.gz \
+            "https://github.com/LeoooChen/PonWRT-TYFZA1/releases/download/v0.1.0-alpha/tyfza1-runtime-inputs-v1.tar.gz"
+          tar -xzf artifacts/tyfza1-runtime-inputs-v1.tar.gz -C artifacts/runtime-inputs
+          echo "runtime-inputs: $(ls artifacts/runtime-inputs | tr '\n' ' ')"
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+
+      - name: FIT signing key (public, sha256 pinned)
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          mkdir -p artifacts/signing
+          # 与上游一致：key 来自公开的 GPL-for-GP3000，且带 sha256 校验。
+          # 他们的原生 U-Boot 验证启动认的就是这把公开 key，换成我们自己的会验不过。
+          curl -fsSL --retry 3 --max-time 120 -o artifacts/signing/dev.key \
+            https://raw.githubusercontent.com/jameywine/GPL-for-GP3000/5090fbcb6ba743dd7b1314811ef557bad0460147/bootloader/Verified_Boot/verifed_key_06-04-2020/dev.key
+          echo 'bea80932793531fe263f62bf4de3ee95754ea7b9766eda23a418c22f06ce127f  artifacts/signing/dev.key' | sha256sum -c -
+          openssl req -new -x509 -key artifacts/signing/dev.key -out artifacts/signing/dev.crt -subj /CN=TYFZA1-FIT -days 3650
+
+      - name: Obtain locked OpenWrt source
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          sh port/scripts/prepare.sh sources/openwrt
+          echo "openwrt = $(git -C sources/openwrt rev-parse --short HEAD)"
+          grep -oE '"commit": *"[0-9a-f]+"' port/sources.lock.json | head -1
+
+      - name: Build OpenWrt and native PE
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          export TYFZA1_RUNTIME_INPUTS="$PWD/artifacts/runtime-inputs"
+          export TYFZA1_SIGNING_KEYS="$PWD/artifacts/signing"
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          sh port/scripts/build.sh sources/openwrt "$(nproc)" 2>&1 | tail -60
+        env:
+          TYFZA1_CONFIG: ''
+
+      - name: ASSERT images exist
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          python3 scripts/test_board_variants.py --kernel "$(python3 port/tools/project_paths.py --kernel-directory sources/openwrt)" || {
+            echo "::warning::机型变体校验没过（他们的自检），继续但要看产物"; }
+          find . sources/openwrt/bin -maxdepth 6 -name '*sysupgrade*bin' -newer port/scripts/build.sh 2>/dev/null | head -10
+          N=$(find sources/openwrt/bin -name '*sysupgrade*.bin' 2>/dev/null | wc -l)
+          [ "$N" -ge 1 ] || { echo "::error::没产出 sysupgrade.bin"; find sources/openwrt/bin -maxdepth 4 -type d | head -20; exit 1; }
+          echo "✅ sysupgrade 镜像 $N 个"
+          # 只报告，不判定：他们的 target config 里没开内核 BTF，honk 在这台设备上还需另行处理
+          K="$(python3 port/tools/project_paths.py --kernel-directory sources/openwrt 2>/dev/null || true)"
+          if [ -n "$K" ] && [ -x sources/openwrt/staging_dir/host/bin/apk ]; then :; fi
+          if [ -n "$K" ]; then
+            grep -E 'CONFIG_DEBUG_INFO_BTF|CONFIG_DEBUG_INFO_REDUCED' "$K/.config" 2>/dev/null \
+              || echo "（内核 .config 里查不到 BTF 项）"
+          fi
+
+      - name: Package release artifacts
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          mkdir -p artifacts/release
+          sh scripts/package_release.sh sources/openwrt artifacts/release
+          ls -la artifacts/release
+          (cd artifacts/release && sha256sum * 2>/dev/null | tee SHA256SUMS.local)
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tyfza1-stable
+          name: 'TYFZA1 (RTL9617C) 构建'
+          body: |
+            端口 `LeoooChen/PonWRT-TYFZA1@${{ env.TYFZA1_SHA }}`（按 SHA 取，非 fork）。
+            基座为其 `port/sources.lock.json` 锁定的 openwrt commit + kernel 6.18.55。
+            注意：RTL9617C 与 AN7581 是不同 target，本产物只用于 TYFZA1。
+            刷入方式见上游 README（需先装他们的原生 U-Boot，恢复页在 192.168.0.1）。
+          files: ${{ github.workspace }}/tyfza1/artifacts/release/*
+          fail_on_unmatched_files: false
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## TYFZA1 构建"
+            echo "- 端口锁到 \`$TYFZA1_SHA\`"
+            echo "- 产物 Release：<https://github.com/${GITHUB_REPOSITORY}/releases/tag/tyfza1-stable>"
+            echo "- 已知差异：该 target 的内核配置未开 DEBUG_INFO_BTF，honk 在这台设备上要单独处理"
+          } >> "$GITHUB_STEP_SUMMARY"

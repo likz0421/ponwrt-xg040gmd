@@ -204,10 +204,10 @@ jobs:
                    kmod-sched-bpf kmod-nfnetlink-queue kmod-nft-core kmod-nf-conntrack; do
             chk "CONFIG_PACKAGE_${p}=y"
           done
-          # honk 预置件必须齐：5 个 apk + 首启安装脚本 + 验签公钥
+          # honk 是解包进 files/ overlay 的（scripts/bake-honk.sh），
+          # 这里先确认预置件与公钥齐；真正「进没进固件」由后面的 rootfs 断言判。
           N=$(find files/etc/apk/local -name '*.apk' 2>/dev/null | wc -l)
           [ "$N" -ge 5 ] || { echo "❌ files/etc/apk/local 只有 $N 个 apk（应 ≥5）"; fail=1; }
-          [ -x files/etc/uci-defaults/96-honk-bake ] || { echo "❌ 缺可执行的首启脚本 96-honk-bake"; fail=1; }
           [ -s files/etc/apk/keys/daeuniverse.pem ] || { echo "❌ 缺 daeuniverse 验签公钥"; fail=1; }
           # 反向检查：这些不该被任何依赖拖进来（拖进来了说明配置漂了）
           for junk in python3 ruby perl; do
@@ -218,7 +218,17 @@ jobs:
           [ "$fail" = 0 ] || { echo "::error::defconfig 后配置与预期不符，见上面 ❌ 列表"; exit 1; }
           echo "✅ 全部断言通过：$(grep -c '^CONFIG_' .config) 个符号"
 
-      # ---------- 9. 下载 + 编译 ----------
+      # ---------- 9a. 先单独编出 host 的 apk 工具，用它把 honk 解进 files/ ----------
+      - name: Build host apk tool
+        run: |
+          cd "$WORK/openwrt"
+          make package/system/apk/host/compile -j"$(nproc)" 2>&1 | tail -8
+          find staging_dir/host/bin -maxdepth 2 -type f -name apk || { echo "::error::没编出 apk 工具"; exit 1; }
+
+      - name: Bake honk into image
+        run: bash "$GITHUB_WORKSPACE/ctrl/scripts/bake-honk.sh" "$WORK/openwrt"
+
+      # ---------- 9b. 下载 + 编译 ----------
       - name: Download packages
         run: |
           cd "$WORK/openwrt"
@@ -278,10 +288,21 @@ jobs:
           done
           [ -z "$MISS" ] || { echo "::error::成品镜像缺这些包:$MISS"; exit 1; }
           echo "✅ 成品包列表齐全：$(wc -l < "$MAN") 个包"
-          # honk 走预置 .apk，不在 manifest 里，核对它们确实进了 rootfs
-          N=$(find build_dir -type f -path '*root-airoha*/etc/apk/local/*.apk' 2>/dev/null | wc -l)
-          [ "$N" -ge 5 ] || { echo "::error::rootfs 里的 honk apk 只有 $N 个（应 ≥5）"; exit 1; }
-          echo "✅ honk 预置件已进 rootfs：$N 个 apk"
+          # honk 是解包进 rootfs 的（不是首启安装），直接查镜像装配目录里的实体文件
+          MISSBIN=""
+          for f in usr/bin/honk-core etc/init.d/honk etc/config/honk etc/honk/config.dae; do
+            found=$(find build_dir -type f -path "*root-airoha*/$f" 2>/dev/null | head -1)
+            [ -n "$found" ] || MISSBIN="$MISSBIN $f"
+          done
+          if [ -n "$MISSBIN" ]; then
+            echo "::error::rootfs 里缺这些 honk 文件:$MISSBIN"
+            find build_dir -maxdepth 1 -type d -name 'root-airoha*'
+            exit 1
+          fi
+          echo "✅ honk 已在 rootfs：$(find build_dir -type f -path '*root-airoha*/usr/bin/honk-core' | head -1) $(du -h "$(find build_dir -type f -path '*root-airoha*/usr/bin/honk-core' | head -1)" | cut -f1)"
+          # LuCI 侧也要有，否则固件里没有配置界面
+          find build_dir -type f -path '*root-airoha*/usr/share/luci/menu.d/*honk*' | grep -q . \
+            || echo "::warning::rootfs 里没找到 honk 的 LuCI menu.d 条目（界面可能进不去，检查 luci-app-honk 载荷）"
           # 内核自带 BTF，不该出现 blob 版 vmlinux-btf
           if grep -qE '^vmlinux-btf - ' "$MAN"; then
             echo "::error::成品里装了 blob 版 vmlinux-btf（我们该用 vmlinux-btf-builtin）"; exit 1
