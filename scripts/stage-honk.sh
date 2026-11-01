@@ -141,7 +141,15 @@ rm -f tmp/info/.files-packageinfo.stamp tmp/info/.files-packageinfo-* \
       tmp/info/.files-targetinfo.stamp tmp/info/.files-targetinfo-*
 make -s prepare-tmpinfo OPENWRT_BUILD= >/dev/null 2>&1 || true
 for p in honk luci-app-honk luci-lib-daeuniverse; do
-	grep -qx "Package: $p" tmp/.packageinfo || { echo "::error::$p 没进 tmp/.packageinfo"; exit 1; }
+	if ! grep -qx "Package: $p" tmp/.packageinfo; then
+		echo "::error::$p 没进 tmp/.packageinfo"
+		# 与"扫描器压根没看这个目录"不同，dump 失败会留下这个文件——里面才是真原因
+		# （例如缺 feeds/luci/luci.mk、依赖符号不存在等）
+		for f in "logs/package/custom/$p/dump.txt" "logs/package/$p/dump.txt"; do
+			[ -f "$f" ] && { echo "----- $f -----"; tail -20 "$f"; }
+		done
+		exit 1
+	fi
 	echo "✅ 索引确认: $p"
 done
 # honk DEPENDS 里这几个必须真在索引里，否则 buildroot 会静默丢掉整个包

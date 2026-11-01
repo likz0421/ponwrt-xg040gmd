@@ -56,6 +56,21 @@ cp "$BASE" "$OUTCFG"
 cp "$OUTCFG" "$T/.config"
 echo "✅ 派生 config：上游 $(grep -c '^CONFIG_' "$BASE") 条 + 我们追加 $(grep -c '^CONFIG_' "$OUTCFG") 条总量"
 
+# ---------- 1b. 先装 luci feed（必须在放 LuCI 包之前）----------
+# luci-app-honk / luci-lib-daeuniverse / 主题的 Makefile 都 include
+# $(TOPDIR)/feeds/luci/luci.mk；上游是在 build.sh 里第 26 行才跑
+# prepare_luci_feeds.sh，那时我们的包还没进树，自检就会因 luci.mk 不存在而 dump 失败。
+# 这里先调他们自己的脚本（幂等，build.sh 再跑一次无影响），不自己拼 feeds 命令。
+FEEDPREP=""
+for c in "$PORT/scripts/prepare_luci_feeds.sh" "$PORT/../scripts/prepare_luci_feeds.sh"; do
+	[ -f "$c" ] && { FEEDPREP="$c"; break; }
+done
+[ -n "$FEEDPREP" ] || { echo "::error::找不到 prepare_luci_feeds.sh，luci.mk 将不存在"; exit 1; }
+echo "--- 先准备 luci feed: $FEEDPREP ---"
+sh "$FEEDPREP" "$T" 2>&1 | tail -5
+[ -f "$T/feeds/luci/luci.mk" ] || { echo "::error::跑完仍没有 feeds/luci/luci.mk"; exit 1; }
+echo "✅ luci.mk 就位"
+
 # ---------- 2. 主题（和 XG 线同一 SHA、同一校验）----------
 set -a; . "$CTRL/pins.env"; set +a
 THEME_TMP="$(mktemp -d)/lucent"
