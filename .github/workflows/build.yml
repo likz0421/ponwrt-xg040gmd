@@ -184,11 +184,20 @@ jobs:
           chk 'CONFIG_KERNEL_BPF_EVENTS=y'
           echo "--- 机型与 PON 链路 ---"
           chk 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y'
-          for p in kmod-airoha-xpon kmod-airoha-pon-frontend kmod-airoha-en7572 \
+          for p in kmod-airoha-xpon kmod-airoha-pon-frontend \
                    airoha-pond airoha-ponctl luci-app-pon kmod-nft-fullcone \
                    kmod-sched-core kmod-nft-queue; do
             chk "CONFIG_PACKAGE_${p}=y"
           done
+          # kmod-airoha-en7572 上游是 =m，靠 CONFIG_MODULE_DEFAULT_*=y 仍然装进镜像，
+          # 并由驱动里的 AUTOLOAD:=AutoProbe 开机自动加载。所以这里容忍 y 或 m，
+          # 但 =m 时必须确认 MODULE_DEFAULT 在，否则它不会进 rootfs，光前端驱动缺失。
+          if grep -qx 'CONFIG_PACKAGE_kmod-airoha-en7572=m' .config; then
+            chk 'CONFIG_MODULE_DEFAULT_kmod-airoha-en7572=y'
+            echo "kmod-airoha-en7572 = m（由 MODULE_DEFAULT=y 装进镜像，AUTOLOAD 开机加载）"
+          else
+            chk 'CONFIG_PACKAGE_kmod-airoha-en7572=y'
+          fi
           echo "--- 我们额外加的插件 / 主题 / honk 依赖 ---"
           for p in luci-app-natmode luci-app-pon-status luci-theme-lucent \
                    libstdcpp kmod-veth v2ray-geoip v2ray-geosite \
@@ -237,6 +246,35 @@ jobs:
           echo "✅ .BTF 段存在，大小 $(( ${SIZE:-0} / 1024 / 1024 )) MB 级"
           IMG=$(find build_dir bin -type f \( -name 'Image' -o -name 'Image.gz' \) | head -1)
           [ -n "$IMG" ] && echo "内核镜像: $IMG ($(du -h "$IMG" | cut -f1))"
+
+      # ---------- 10b. 断言：成品镜像里真的有这些功能 ----------
+      # .config 里有符号 ≠ 设备里有功能（kmod 的 =m + MODULE_DEFAULT 就是这样）。
+      # 直接核对产出的 .manifest 和 rootfs，才是「刷进去能不能用」的判据。
+      - name: ASSERT image contents
+        run: |
+          set -euo pipefail
+          cd "$WORK/openwrt"
+          MAN=$(find bin/targets/airoha/an7581 -maxdepth 1 -name '*nokia_xg-040g-md-ubi.manifest' | head -1)
+          [ -n "$MAN" ] || { echo "::error::找不到 manifest，无法核对成品包列表"; exit 1; }
+          echo "核对 $MAN"
+          MISS=""
+          for p in kmod-airoha-xpon kmod-airoha-pon-frontend kmod-airoha-en7572 \
+                   airoha-pond airoha-ponctl luci-app-pon luci-app-natmode \
+                   luci-app-pon-status luci-theme-lucent kmod-nft-fullcone \
+                   kmod-sched-core kmod-nft-queue kmod-nfnetlink-queue \
+                   libstdcpp v2ray-geosite v2ray-geoip; do
+            grep -qE "^${p} - " "$MAN" || MISS="$MISS $p"
+          done
+          [ -z "$MISS" ] || { echo "::error::成品镜像缺这些包:$MISS"; exit 1; }
+          echo "✅ 成品包列表齐全：$(wc -l < "$MAN") 个包"
+          # honk 走预置 .apk，不在 manifest 里，核对它们确实进了 rootfs
+          N=$(find build_dir -type f -path '*root-airoha*/etc/apk/local/*.apk' 2>/dev/null | wc -l)
+          [ "$N" -ge 5 ] || { echo "::error::rootfs 里的 honk apk 只有 $N 个（应 ≥5）"; exit 1; }
+          echo "✅ honk 预置件已进 rootfs：$N 个 apk"
+          # 内核自带 BTF，不该出现 blob 版 vmlinux-btf
+          if grep -qE '^vmlinux-btf - ' "$MAN"; then
+            echo "::error::成品里装了 blob 版 vmlinux-btf（我们该用 vmlinux-btf-builtin）"; exit 1
+          fi
 
       # ---------- 11. 产物 ----------
       - name: Organize firmware
