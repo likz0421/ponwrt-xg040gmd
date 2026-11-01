@@ -37,30 +37,38 @@ git -C "$THEME_TMP" fetch -q --depth 1 origin "$THEME_SHA"
 git -C "$THEME_TMP" checkout -q FETCH_HEAD
 [ "$(git -C "$THEME_TMP" rev-parse HEAD)" = "$THEME_SHA" ] || { echo "::error::主题源 SHA 不匹配"; exit 1; }
 [ -f "$THEME_TMP/Makefile" ] || { echo "::error::主题缺 Makefile"; exit 1; }
+# ↑ 上面两条假设都被实测否掉了。真正原因在 include/scan.mk：
+#   find -L $(SCAN_DIR) ... -name Makefile | xargs grep -aHE 'call (BuildPackage|KernelPackage|...)'
+# 即「包自己的 Makefile 文本」必须出现 call BuildPackage 字样，目录才会被送去 dump；
+# luci.mk 里那句真正的调用 grep 看不见。缺标记时是静默跳过（不报错、无 logs/ 目录、
+# 不进 .packageinfo）—— 与前两轮观察完全一致。已在主题仓库 commit 6a1f491d 补上标记。
 rm -rf "$PKG_DIR/luci-theme-lucent"
 cp -a "$THEME_TMP" "$PKG_DIR/luci-theme-lucent"
-# 关键：临时 clone 的仓库根就是主题本体，cp -a 会把 .git 一起带进 package/。
-# 两个插件是从仓库根的子目录拷出来的，那层没有 .git —— 这就是上一轮只有主题
-# 进不了索引、插件正常的原因。构建树里的包目录不该有 .git（扫描/打包都可能受影响）。
-rm -rf "$PKG_DIR/luci-theme-lucent/.git"
+rm -rf "$PKG_DIR/luci-theme-lucent/.git"          # 构建树里的包目录不该带 .git
 rm -rf "$(dirname "$THEME_TMP")"
-echo "✅ 已放置 luci-theme-lucent  @ ${THEME_SHA:0:7} 版本 $(grep -m1 '^PKG_VERSION' "$PKG_DIR/luci-theme-lucent/Makefile" | cut -d= -f2)"
-echo "   目录内容: $(ls -1 "$PKG_DIR/luci-theme-lucent" | tr '\n' ' ')"
-# 重建索引：只删 .packageinfo 不够，prepare-tmpinfo 有 scan_unchanged 的 stamp 优化，
-# stamp 还在就跳过扫描，结果索引被删了却没人重建。stamp 必须一起删。
-rm -f tmp/.packageinfo tmp/.targetinfo tmp/info/.scan-packageinfo.stamp tmp/info/.scan-targetinfo.stamp
-echo "--- make prepare-tmpinfo（输出保留 20 行，扫描报错在这里）---"
+grep -q 'call BuildPackage' "$PKG_DIR/luci-theme-lucent/Makefile" || {
+	echo "::error::主题 Makefile 没有 scan.mk 需要的 call BuildPackage 标记，会被扫描器静默跳过"
+	exit 1
+}
+echo "✅ 已放置 luci-theme-lucent  @ ${THEME_SHA:0:7} 版本 $(grep -m1 '^PKG_VERSION' "$PKG_DIR/luci-theme-lucent/Makefile" | cut -d= -f2)（扫描标记 ✓）"
+# 重建索引。stamp 的真实名字是 tmp/info/.files-<target>.stamp 与 .files-<target>-<cookie>
+# （include/scan.mk 的 FILELIST / TARGET_STAMP），不是 .scan-packageinfo.stamp ——
+# 名字错了就等于没删，扫描会复用旧的文件列表，新放的包看不见。
+rm -f tmp/.packageinfo tmp/.targetinfo
+rm -f tmp/info/.files-packageinfo.stamp tmp/info/.files-packageinfo-* \
+      tmp/info/.files-targetinfo.stamp tmp/info/.files-targetinfo-*
+echo "--- make prepare-tmpinfo ---"
 make -s prepare-tmpinfo OPENWRT_BUILD= 2>&1 | tail -20 || true
 echo "----------------------------------------"
 for p in luci-app-natmode luci-app-pon-status luci-theme-lucent; do
 	if ! grep -qx "Package: $p" tmp/.packageinfo; then
 		echo "::error::$p 没进 tmp/.packageinfo，defconfig 会静默剔除"
-		echo "----- 该包目录实际内容 -----"
-		ls -la "$PKG_DIR/$p" 2>&1 | head -8
-		echo "----- buildroot 扫描日志 -----"
-		[ -d "logs/package/custom/$p" ] && ls -la "logs/package/custom/$p"
-		for f in "logs/package/$p/dump.txt" "logs/package/custom/$p/dump.txt"; do
-			[ -f "$f" ] && { echo "===== $f ====="; tail -25 "$f"; }
+		echo "----- 扫描器是否把它列进候选 -----"
+		grep -c "$p" tmp/info/.files-packageinfo-* 2>/dev/null | head -3
+		[ -f "$PKG_DIR/$p/Makefile" ] && grep -c 'call BuildPackage' "$PKG_DIR/$p/Makefile"
+		echo "----- buildroot dump 日志 -----"
+		for d in "logs/package/custom/$p"; do
+			[ -d "$d" ] && { echo "== $d =="; ls "$d"; tail -25 "$d/dump.txt" 2>/dev/null; }
 		done
 		exit 1
 	fi
