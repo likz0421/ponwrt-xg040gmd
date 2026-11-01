@@ -39,18 +39,28 @@ git -C "$THEME_TMP" checkout -q FETCH_HEAD
 [ -f "$THEME_TMP/Makefile" ] || { echo "::error::主题缺 Makefile"; exit 1; }
 rm -rf "$PKG_DIR/luci-theme-lucent"
 cp -a "$THEME_TMP" "$PKG_DIR/luci-theme-lucent"
+# 关键：临时 clone 的仓库根就是主题本体，cp -a 会把 .git 一起带进 package/。
+# 两个插件是从仓库根的子目录拷出来的，那层没有 .git —— 这就是上一轮只有主题
+# 进不了索引、插件正常的原因。构建树里的包目录不该有 .git（扫描/打包都可能受影响）。
+rm -rf "$PKG_DIR/luci-theme-lucent/.git"
 rm -rf "$(dirname "$THEME_TMP")"
 echo "✅ 已放置 luci-theme-lucent  @ ${THEME_SHA:0:7} 版本 $(grep -m1 '^PKG_VERSION' "$PKG_DIR/luci-theme-lucent/Makefile" | cut -d= -f2)"
+echo "   目录内容: $(ls -1 "$PKG_DIR/luci-theme-lucent" | tr '\n' ' ')"
 # 重建索引：只删 .packageinfo 不够，prepare-tmpinfo 有 scan_unchanged 的 stamp 优化，
 # stamp 还在就跳过扫描，结果索引被删了却没人重建。stamp 必须一起删。
 rm -f tmp/.packageinfo tmp/.targetinfo tmp/info/.scan-packageinfo.stamp tmp/info/.scan-targetinfo.stamp
-make -s prepare-tmpinfo OPENWRT_BUILD= >/dev/null 2>&1 || true
+echo "--- make prepare-tmpinfo（输出保留 20 行，扫描报错在这里）---"
+make -s prepare-tmpinfo OPENWRT_BUILD= 2>&1 | tail -20 || true
+echo "----------------------------------------"
 for p in luci-app-natmode luci-app-pon-status luci-theme-lucent; do
 	if ! grep -qx "Package: $p" tmp/.packageinfo; then
 		echo "::error::$p 没进 tmp/.packageinfo，defconfig 会静默剔除"
-		# buildroot 扫描失败的具体原因在这个文件里，不打出来就只能猜
+		echo "----- 该包目录实际内容 -----"
+		ls -la "$PKG_DIR/$p" 2>&1 | head -8
+		echo "----- buildroot 扫描日志 -----"
+		[ -d "logs/package/custom/$p" ] && ls -la "logs/package/custom/$p"
 		for f in "logs/package/$p/dump.txt" "logs/package/custom/$p/dump.txt"; do
-			[ -f "$f" ] && { echo "----- $f -----"; tail -20 "$f"; }
+			[ -f "$f" ] && { echo "===== $f ====="; tail -25 "$f"; }
 		done
 		exit 1
 	fi
