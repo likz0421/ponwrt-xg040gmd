@@ -107,34 +107,58 @@ jobs:
           echo "openwrt = $(git -C sources/openwrt rev-parse --short HEAD)"
           grep -oE '"commit": *"[0-9a-f]+"' port/sources.lock.json | head -1
 
+      - name: Stage our additions (BTF + honk + lucent theme)
+        # 用上游自己留的 TYFZA1_CONFIG 扩展点：派生 config = 他们的 tyfza1-boot.config
+        # + 我们那几行；包放进 sources/openwrt/package/custom/，不碰他们任何文件。
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ctrl/scripts/stage-tyfza1.sh" \
+            "$TYFZA1_WORK/sources/openwrt" "$TYFZA1_WORK" \
+            "$GITHUB_WORKSPACE/ctrl" "$TYFZA1_WORK/artifacts/custom.config"
+
       - name: Build OpenWrt and native PE
         run: |
           set -euo pipefail
           cd "$TYFZA1_WORK"
           export TYFZA1_RUNTIME_INPUTS="$PWD/artifacts/runtime-inputs"
           export TYFZA1_SIGNING_KEYS="$PWD/artifacts/signing"
+          export TYFZA1_CONFIG="$PWD/artifacts/custom.config"
           export PATH="/usr/lib/llvm-18/bin:$PATH"
+          echo "注入用的 config：$(grep -c '^CONFIG_' "$TYFZA1_CONFIG") 条，其中我们追加的："
+          sed -n '/ponwrt-xg040gmd 追加/,$p' "$TYFZA1_CONFIG" | head -30
           sh port/scripts/build.sh sources/openwrt "$(nproc)" 2>&1 | tail -60
-        env:
-          TYFZA1_CONFIG: ''
 
-      - name: ASSERT images exist
+      - name: ASSERT images and our additions
         run: |
           set -euo pipefail
           cd "$TYFZA1_WORK"
-          python3 scripts/test_board_variants.py --kernel "$(python3 port/tools/project_paths.py --kernel-directory sources/openwrt)" || {
-            echo "::warning::机型变体校验没过（他们的自检），继续但要看产物"; }
-          find . sources/openwrt/bin -maxdepth 6 -name '*sysupgrade*bin' -newer port/scripts/build.sh 2>/dev/null | head -10
+          python3 scripts/test_board_variants.py --kernel "$(python3 port/tools/project_paths.py --kernel-directory sources/openwrt)" \
+            || echo "::warning::上游机型变体自检没过（不是我们引入的话，继续看产物）"
           N=$(find sources/openwrt/bin -name '*sysupgrade*.bin' 2>/dev/null | wc -l)
           [ "$N" -ge 1 ] || { echo "::error::没产出 sysupgrade.bin"; find sources/openwrt/bin -maxdepth 4 -type d | head -20; exit 1; }
           echo "✅ sysupgrade 镜像 $N 个"
-          # 只报告，不判定：他们的 target config 里没开内核 BTF，honk 在这台设备上还需另行处理
-          K="$(python3 port/tools/project_paths.py --kernel-directory sources/openwrt 2>/dev/null || true)"
-          if [ -n "$K" ] && [ -x sources/openwrt/staging_dir/host/bin/apk ]; then :; fi
-          if [ -n "$K" ]; then
-            grep -E 'CONFIG_DEBUG_INFO_BTF|CONFIG_DEBUG_INFO_REDUCED' "$K/.config" 2>/dev/null \
-              || echo "（内核 .config 里查不到 BTF 项）"
-          fi
+          echo "=== 1) 内核里必须有 .BTF（honk 的硬前提）==="
+          VML=$(find sources/openwrt/build_dir -maxdepth 5 -type f -name vmlinux -path '*/linux-*/*' | head -1)
+          [ -n "$VML" ] || { echo "::error::找不到 vmlinux"; exit 1; }
+          readelf -S "$VML" | grep -E '\.BTF( |_])' || { echo "::error::vmlinux 没有 .BTF 段 → BTF 没生效"; exit 1; }
+          echo "✅ .BTF 在 $VML"
+          echo "=== 2) rootfs 的 apk 库里必须有我们加的包 ==="
+          ROOTFS=$(find sources/openwrt/build_dir -maxdepth 1 -type d -name 'root-rtl9617c*' | head -1)
+          [ -n "$ROOTFS" ] || ROOTFS=$(find sources/openwrt/build_dir -maxdepth 2 -type d -name 'root-*' | head -1)
+          DB="$ROOTFS/lib/apk/db/installed"
+          [ -s "$DB" ] || { echo "::error::没有 apk 数据库 $DB，无法核对"; exit 1; }
+          MISS=""
+          for p in honk luci-app-honk luci-lib-daeuniverse luci-theme-lucent kmod-sched-core kmod-nft-queue kmod-nfnetlink-queue v2ray-geosite; do
+            grep -qE "^P:$p$" "$DB" || MISS="$MISS $p"
+          done
+          [ -z "$MISS" ] || { echo "::error::镜像里缺这些包:$MISS"; exit 1; }
+          echo "✅ 我们加的包都在镜像里（apk 库共 $(grep -c '^P:' "$DB") 条）"
+          echo "=== 3) 实体文件 ==="
+          for f in usr/bin/honk-core etc/init.d/honk usr/lib/luci-theme-lucent; do
+            [ -e "$ROOTFS/$f" ] || echo "· 注：$f 不在此路径（主题资源在 www/ 与 usr/share/luci 下）"
+          done
+          [ -e "$ROOTFS/usr/bin/honk-core" ] || { echo "::error::rootfs 里没有 honk-core"; exit 1; }
+          du -h "$ROOTFS/usr/bin/honk-core"
 
       - name: Package release artifacts
         run: |
@@ -148,13 +172,17 @@ jobs:
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: tyfza1-stable
-          name: 'TYFZA1 (RTL9617C) 构建'
+          tag_name: tyfza1-plus
+          name: 'TYFZA1 (RTL9617C) 上游 + BTF/honk/Lucent 主题'
           body: |
-            端口 `LeoooChen/PonWRT-TYFZA1@${{ env.TYFZA1_SHA }}`（按 SHA 取，非 fork）。
-            基座为其 `port/sources.lock.json` 锁定的 openwrt commit + kernel 6.18.55。
-            注意：RTL9617C 与 AN7581 是不同 target，本产物只用于 TYFZA1。
-            刷入方式见上游 README（需先装他们的原生 U-Boot，恢复页在 192.168.0.1）。
+            基座完全按上游：<https://github.com/LeoooChen/PonWRT-TYFZA1@${{ env.TYFZA1_SHA }}>
+            （按 SHA 取，非 fork；其 sources.lock.json 锁的 openwrt commit + kernel 6.18.55）。
+            只额外加三样，且不改上游任何文件（用他们自己留的 TYFZA1_CONFIG 扩展点派生 config）：
+            1. 内核 BTF + honk 需要的 eBPF/TC 模块
+            2. honk（daeuniverse）：官方 release 静态二进制包 + luci-app-honk + luci-lib-daeuniverse
+            3. 主题 luci-theme-lucent（argon 仍在，按上游要求保留）
+            RTL9617C 与 AN7581 是不同 target，本产物只用于 TYFZA1。
+            刷入见上游 README：先装他们的原生 U-Boot，恢复页 http://192.168.0.1。
           files: ${{ github.workspace }}/tyfza1/artifacts/release/*
           fail_on_unmatched_files: false
 
@@ -164,6 +192,7 @@ jobs:
           {
             echo "## TYFZA1 构建"
             echo "- 端口锁到 \`$TYFZA1_SHA\`"
-            echo "- 产物 Release：<https://github.com/${GITHUB_REPOSITORY}/releases/tag/tyfza1-stable>"
-            echo "- 已知差异：该 target 的内核配置未开 DEBUG_INFO_BTF，honk 在这台设备上要单独处理"
+            echo "- 基座上游锁定 \`$TYFZA1_SHA\`；追加仅三项：BTF/eBPF、honk、luci-theme-lucent"
+            echo "- 产物 Release：<https://github.com/${GITHUB_REPOSITORY}/releases/tag/tyfza1-plus>"
+            echo "- 构建后已断言：vmlinux 含 .BTF、rootfs apk 库含 honk 三件与主题"
           } >> "$GITHUB_STEP_SUMMARY"
