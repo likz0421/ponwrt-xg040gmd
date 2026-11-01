@@ -219,6 +219,23 @@ jobs:
           echo "✅ 全部断言通过：$(grep -c '^CONFIG_' .config) 个符号"
 
       # ---------- 9a. 先单独编出 host 的 apk 工具，用它把 honk 解进 files/ ----------
+      # ---------- 8b. 先单独编我们自加的包 ----------
+      # 上一轮 install 参数被行内注释吃掉，是在 2 小时后的 world 编译才暴露。
+      # 这三个包只是下载+装文件，几十秒就能判生死，先单独编一遍。
+      - name: Pre-compile our packages
+        run: |
+          set -euo pipefail
+          cd "$WORK/openwrt"
+          for p in honk luci-app-honk luci-lib-daeuniverse luci-app-natmode luci-app-pon-status luci-theme-lucent; do
+            echo "=== make package/custom/$p/compile ==="
+            make "package/custom/$p/compile" -j"$(nproc)" 2>&1 | tail -6
+          done
+          echo "--- 产物 ---"
+          find bin/packages bin/targets -name 'honk-*.apk' -o -name 'luci-app-honk*.apk' -o -name 'luci-theme-lucent*.apk' 2>/dev/null | head -8
+          N=$(find bin/packages -name 'honk-*.apk' 2>/dev/null | wc -l)
+          [ "$N" -ge 1 ] || { echo "::error::honk 包没编出来（看上面的 make 输出）"; exit 1; }
+          echo "✅ 自加包全部编出"
+
       # ---------- 9. 下载 + 编译 ----------
       - name: Download packages
         run: |
