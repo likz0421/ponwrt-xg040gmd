@@ -254,8 +254,19 @@ jobs:
         run: |
           set -euo pipefail
           cd "$WORK/openwrt"
-          MAN=$(find bin/targets/airoha/an7581 -maxdepth 1 -name '*nokia_xg-040g-md-ubi.manifest' | head -1)
-          [ -n "$MAN" ] || { echo "::error::找不到 manifest，无法核对成品包列表"; exit 1; }
+          # manifest 文件名各版本不同（可能带 -rootfs 等后缀），逐级放宽，别一上来就赌名字
+          MAN=$(find bin/targets/airoha/an7581 -maxdepth 2 -name '*nokia_xg-040g-md-ubi*.manifest' 2>/dev/null \
+                | grep -v -- '-rootfs\.' | head -1 || true)
+          [ -n "$MAN" ] || MAN=$(find bin/targets/airoha/an7581 -maxdepth 2 -name '*nokia_xg-040g-md-ubi*.manifest' 2>/dev/null | head -1 || true)
+          [ -n "$MAN" ] || MAN=$(find bin/targets/airoha/an7581 -maxdepth 2 -name '*.manifest' 2>/dev/null | head -1 || true)
+          if [ -z "$MAN" ]; then
+            echo "----- bin/targets/airoha/an7581 实际内容 -----"
+            ls -la bin/targets/airoha/an7581 | head -40
+            echo "----- 所有 .manifest -----"
+            find bin -name '*.manifest' | head -20
+            echo "::error::找不到任何 manifest，无法核对成品包列表"
+            exit 1
+          fi
           echo "核对 $MAN"
           MISS=""
           for p in kmod-airoha-xpon kmod-airoha-pon-frontend kmod-airoha-en7572 \
@@ -275,6 +286,24 @@ jobs:
           if grep -qE '^vmlinux-btf - ' "$MAN"; then
             echo "::error::成品里装了 blob 版 vmlinux-btf（我们该用 vmlinux-btf-builtin）"; exit 1
           fi
+
+      # ---------- 10c. 失败时把小而关键的诊断文件传出来（不含 .itb）----------
+      - name: Collect debug info
+        if: failure()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/debug"
+          B="$WORK/openwrt/bin/targets/airoha/an7581"
+          cp "$B"/*.manifest "$B"/profiles.json "$B"/config.buildinfo "$B"/version.buildinfo \
+             "$B"/feeds.buildinfo "$B"/sha256sums "$GITHUB_WORKSPACE/debug/" 2>/dev/null || true
+          du -sh "$GITHUB_WORKSPACE/debug"; ls -1 "$GITHUB_WORKSPACE/debug" | head -20
+      - name: Upload debug info
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-run-${{ github.run_id }}
+          path: debug
+          if-no-files-found: ignore
+          retention-days: 14
 
       # ---------- 11. 产物 ----------
       - name: Organize firmware
