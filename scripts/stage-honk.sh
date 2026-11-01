@@ -10,7 +10,14 @@ ROOT="${1:?用法: stage-honk.sh <openwrt源码根>}"
 CTRL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 M="$CTRL/honk-manifest.txt"
 [ -f "$M" ] || { echo "::error::找不到 $M"; exit 1; }
-val() { awk -F= -v k="$1" '$1==k{print $2}' "$M" | tail -1; }
+val() {   # 取 key=value，剥掉行内注释与首尾空白
+	awk -F= -v k="$1" '$1==k{
+		sub(/^[^=]*=/, "");            # 去掉 key=
+		sub(/[ \t]+#.*$/, "");         # 去掉行内注释（曾经把 install 的目标路径吃掉）
+		gsub(/^[ \t]+|[ \t]+$/, "");   # 去首尾空白
+		print
+	}' "$M" | tail -1
+}
 HONK_VERSION="$(val HONK_VERSION)"; HONK_ASSET="$(val HONK_ASSET)"
 HONK_URL="$(val HONK_URL)";        HONK_SHA256="$(val HONK_SHA256)"
 HONK_FILE="$(val HONK_FILE)"
@@ -18,6 +25,11 @@ DAEUNIV_URL="$(val DAEUNIV_URL)";  DAEUNIV_SHA="$(val DAEUNIV_SHA)"
 for v in HONK_VERSION HONK_ASSET HONK_URL HONK_SHA256 HONK_FILE DAEUNIV_URL DAEUNIV_SHA; do
 	[ -n "${!v}" ] || { echo "::error::honk-manifest.txt 缺 $v"; exit 1; }
 done
+# 值必须是干净 token：带空格/# 的取值会拼进 Makefile recipe，install 会吃掉目标路径
+case "$HONK_FILE" in *[!A-Za-z0-9._-]*) echo "::error::HONK_FILE 含非法字符: [$HONK_FILE]"; exit 1;; esac
+case "$HONK_ASSET" in *[!A-Za-z0-9._+-]*) echo "::error::HONK_ASSET 含非法字符: [$HONK_ASSET]"; exit 1;; esac
+case "$HONK_SHA256" in *[!0-9a-f]*) echo "::error::HONK_SHA256 不是十六进制: [$HONK_SHA256]"; exit 1;; esac
+[ "${#HONK_SHA256}" = 64 ] || { echo "::error::HONK_SHA256 长度 ${#HONK_SHA256} ≠ 64"; exit 1; }
 echo "honk $HONK_VERSION  资产 $HONK_ASSET"
 echo "     sha256 $HONK_SHA256（与 release 的 SHA256SUMS 逐字核对过）"
 echo "feed  $DAEUNIV_URL @ ${DAEUNIV_SHA:0:7}"

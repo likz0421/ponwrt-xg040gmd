@@ -18,7 +18,8 @@ HONK_ASSET=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
 HONK_URL=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.4/honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
 # 与 release 附带的 SHA256SUMS 逐字核对过（不是只信我自己下载后算的那次）
 HONK_SHA256=121c94f3a30091c5550ae503ddf7bce118def08ddc301a7f8ffa740f956476d0
-HONK_FILE=honk-core            # 资产内的文件名（静态链接 ELF，30.7MB）
+# 资产内的文件名（静态链接 ELF，30.7MB）
+HONK_FILE=honk-core
 
 # 三个包的来源：daeuniverse/openwrt-packages（feed 形态，源码），锁 SHA
 DAEUNIV_URL=https://github.com/daeuniverse/openwrt-packages
