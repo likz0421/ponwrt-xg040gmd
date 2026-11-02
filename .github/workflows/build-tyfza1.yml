@@ -181,6 +181,14 @@ jobs:
           [ -x "$HOSTBIN/pahole" ] || { echo "::error::$HOSTBIN/pahole 不存在（tools/dwarves 应由 CONFIG_DWARVES 编出）"; ls "$HOSTBIN" | grep -i pahole || true; exit 1; }
           echo "pahole：$("$HOSTBIN/pahole" --version | head -1)"
           SEED=""; BUILT=""; TRIES=0
+          # 从一次尝试的输出 + OpenWrt 的 logs/ 里提取被提问的符号名。
+          # 用 `find -exec cat {} +` 而不是 `cat "$(find …)"`：后者把整串多行路径当成一个文件名，
+          # logs/ 里只有一个文件时也能"看起来正常"，多文件时就读不到任何东西。
+          pick_new() {
+            { cat "$1" 2>/dev/null; find logs -type f -exec cat {} + 2>/dev/null | tail -c 400000; } \
+              | grep -oE '\(([A-Z][A-Z0-9_]*)\) \[[^]]*\] \(NEW\)' \
+              | sed -E 's/\) \[.*//; s/^\(//' | sort -u || true
+          }
           for i in 1 2 3 4; do
             log="$TYFZA1_WORK/kernel-try-$i.log"
             if make target/compile -j"$(nproc)" > "$log" 2>&1; then
@@ -191,18 +199,28 @@ jobs:
             [ -s "$KD/.config" ] || { echo "::error::第 $i 次：内核 .config 没生成（configure 没跑到）"; tail -40 "$log"; exit 1; }
             [ -n "$SEED" ] || SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
             [ -n "$SEED" ] || { echo "::error::找不到 rtl9617c 的内核种子配置"; exit 1; }
-            NEW=$(grep -oE '\(([A-Z][A-Z0-9_]*)\) \[[^]]*\] \(NEW\)' "$log" | sed -E 's/\) \[.*//; s/^\(//' | sort -u || true)
+            # (NEW) 提问在哪份文件里，取决于 make 的输出模式：
+            #   并行不带 V=s 时 OpenWrt 把每个阶段的输出收进 logs/，stdout 只剩摘要，
+            #   所以上一轮我在 $log 里根本找不到提问（不是"kconfig 没提问"）。
+            # 因此两处都查；还查不到就用 -j1 V=s 单跑一次（提问一定在 stdout 上），
+            # 再拿不到才是真的别的错误。
+            NEW=$(pick_new "$log")
             if [ -z "$NEW" ]; then
-              echo "::error::第 $i 次失败，但不是 kconfig 提问导致的 —— 真错误如下"
-              if grep -q "C compiler .* not found\|No such file or directory.*-gcc" "$log"; then
-                echo "::error::（内核 kconfig 跑不到交叉编译器：toolchain 没装好，不是配置问题）"
+              vlog="$TYFZA1_WORK/kernel-verbose-$i.log"
+              echo "第 $i 次：stdout/logs/ 里没抓到提问，用 -j1 V=s 单跑一次拿提问"
+              make target/compile -j1 V=s > "$vlog" 2>&1 || true
+              NEW=$(pick_new "$vlog")
+              log="$vlog"
+              if [ -z "$NEW" ]; then
+                echo "::error::第 $i 次失败，且不是 kconfig 提问导致的 —— 真错误如下"
+                if grep -qE "C compiler .* not found|No such file or directory.*-gcc" "$vlog"; then
+                  echo "::error::（内核 kconfig 跑不到交叉编译器：toolchain 没装好，不是配置问题）"
+                fi
+                grep -nE '\*\*\*|[Ee]rror:|No rule|cannot|undefined reference' "$vlog" | head -20 || true
+                LN=$(grep -nE 'ERROR: |Error [0-9]' "$vlog" | tail -1 | cut -d: -f1 || true)
+                if [ -n "${LN:-}" ]; then sed -n "$((LN>80 ? LN-80 : 1)),$((LN+15))p" "$vlog"; else tail -100 "$vlog"; fi
+                exit 1
               fi
-              grep -nE '\*\*\*|[Ee]rror:|No rule|cannot|undefined reference' "$log" | head -20 || true
-              LN=$(grep -nE 'ERROR: |Error [0-9]' "$log" | tail -1 | cut -d: -f1 || true)
-              if [ -n "${LN:-}" ]; then sed -n "$((LN>80 ? LN-80 : 1)),$((LN+15))p" "$log"; else tail -100 "$log"; fi
-              echo "----- 再用 -j1 V=s 单跑一次拿完整上下文 -----"
-              make target/compile -j1 V=s 2>&1 | tail -80 || true
-              exit 1
             fi
             echo "第 $i 轮：kconfig 提问 $(printf '%s\n' "$NEW" | wc -l) 个符号：$(printf '%s ' $NEW)"
             # olddefconfig，不是 oldconfig：后者逐个提问，喂 </dev/null 会中途报错退出。
