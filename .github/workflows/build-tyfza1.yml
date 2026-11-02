@@ -118,8 +118,11 @@ jobs:
         # 我们把 DEBUG_INFO/BTF/FTRACE 打开后，被"解锁"出来的新符号在 rtl9617c 的
         # 内核种子配置里没有答案；而 OpenWrt 编内核时带 FAIL_ON_UNCONFIGURED=1
         # （include/kernel-build.mk:178），syncconfig 见 NEW 就报错，不会自己取默认值。
-        # 官方对策就是 make target/linux/oldconfig：用默认值回答，再把结果写回种子
-        # （include/target.mk:181 LINUX_RECONFIG_TARGET = target/linux/<tail>/config-*）。
+        # 官方入口是 `make kernel_oldconfig`（include/toplevel.mk:193，它自己去
+        # `-C target/linux oldconfig` 并先备好 quilt）。**不是** `target/linux/oldconfig`：
+        # 顶层只有 `%::` 兜底规则，会把那个字符串原样交给 SUBMAKE -r，于是
+        # "No rule to make target 'target/linux/oldconfig'"（上一轮就是这么死的，
+        # 而且内核压根还没解包）。
         # 只改 CI 工作树里那份种子，上游仓库一个字不动。
         run: |
           set -euo pipefail
@@ -136,8 +139,8 @@ jobs:
           echo "✅ defconfig 后 BTF 仍在（.config $(grep -c '^CONFIG_' .config) 条）"
           make tools/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-tools.log" 2>&1 || {
             echo "::error::tools/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-tools.log"; exit 1; }
-          make target/linux/oldconfig -j1 V=s </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {
-            echo "::error::make target/linux/oldconfig 失败（V=s 全量日志如下）"
+          make kernel_oldconfig -j1 V=s </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {
+            echo "::error::make kernel_oldconfig 失败（V=s 全量日志如下）"
             echo "----- 日志 $(wc -l < "$TYFZA1_WORK/oldconfig.log") 行；先给错误行 -----"
             grep -nE '\*\*\*|[Ee]rror|No rule|not found|cannot|Permission' \
               "$TYFZA1_WORK/oldconfig.log" | head -25 || true
