@@ -180,7 +180,7 @@ jobs:
           HOSTBIN="$PWD/staging_dir/host/bin"
           [ -x "$HOSTBIN/pahole" ] || { echo "::error::$HOSTBIN/pahole 不存在（tools/dwarves 应由 CONFIG_DWARVES 编出）"; ls "$HOSTBIN" | grep -i pahole || true; exit 1; }
           echo "pahole：$("$HOSTBIN/pahole" --version | head -1)"
-          SEED=""; BUILT=""; TRIES=0
+          SEED=""; OVL=""; BUILT=""; TRIES=0
           # 从一次尝试的输出 + OpenWrt 的 logs/ 里提取被提问的符号名。
           # 用 `find -exec cat {} +` 而不是 `cat "$(find …)"`：后者把整串多行路径当成一个文件名，
           # logs/ 里只有一个文件时也能"看起来正常"，多文件时就读不到任何东西。
@@ -199,6 +199,13 @@ jobs:
             [ -s "$KD/.config" ] || { echo "::error::第 $i 次：内核 .config 没生成（configure 没跑到）"; tail -40 "$log"; exit 1; }
             [ -n "$SEED" ] || SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
             [ -n "$SEED" ] || { echo "::error::找不到 rtl9617c 的内核种子配置"; exit 1; }
+            # 答案必须写进 **overlay 里那份**种子：port/scripts/sync-overlay.sh:15 是
+            # `rsync -a --delete port/overlay/target/linux/rtl9617c/ → 树`，
+            # build.sh 第 25 行会再跑一次它，树里那份会被原样覆盖回上游版本 ——
+            # 上一轮就是这样：第 12 步内核编过了，第 13 步 build.sh 又把
+            # LEDS_TRIGGER_TYFZA1_USB (NEW) 重新问了一遍。
+            [ -n "${OVL:-}" ] || OVL="$TYFZA1_WORK/port/overlay/target/linux/rtl9617c/$(basename "$SEED")"
+            [ -s "$OVL" ] || { echo "::error::overlay 里没有对应种子文件：$OVL（写树里会被 rsync --delete 擦掉）"; exit 1; }
             # (NEW) 提问在哪份文件里，取决于 make 的输出模式：
             #   并行不带 V=s 时 OpenWrt 把每个阶段的输出收进 logs/，stdout 只剩摘要，
             #   所以上一轮我在 $log 里根本找不到提问（不是"kconfig 没提问"）。
@@ -245,12 +252,16 @@ jobs:
             done
             ADD=$(grep -c . "$TYFZA1_WORK/seed-add.conf" || true)
             if [ "${ADD:-0}" -gt 0 ]; then
-              printf '\n# ponwrt：kconfig 提问过的符号，按默认值补答（仅本工作树，不改上游）\n' >> "$SEED"
-              cat "$TYFZA1_WORK/seed-add.conf" >> "$SEED"
+              # 先写 overlay（真身），再按 rsync 同样的效果覆盖树里那份，
+              # 好让本轮下一次 make target/compile 就用上新答案
+              printf '\n# ponwrt：kconfig 提问过的符号，按默认值补答（仅本工作树，不改上游）\n' >> "$OVL"
+              cat "$TYFZA1_WORK/seed-add.conf" >> "$OVL"
+              cp -f "$OVL" "$SEED"
             fi
             TRIES=$i
-            echo "  → 写回 $SEED：本轮 $ADD 行，种子现有 $(grep -c '^CONFIG_\|^# CONFIG_' "$SEED") 行"
+            echo "  → 写回 $OVL（并同步到 $SEED）：本轮 $ADD 行，种子现有 $(grep -c '^CONFIG_\|^# CONFIG_' "$SEED") 行"
             git diff --stat -- target/linux/rtl9617c || true
+            git -C "$TYFZA1_WORK" diff --stat -- port/overlay || true
           done
           [ -n "$BUILT" ] || { echo "::error::$TRIES 轮补答后内核仍编不过"; tail -60 "$TYFZA1_WORK/kernel-try-4.log"; exit 1; }
           KC=$(find build_dir -maxdepth 5 -type f -name .config -path '*linux-rtl9617c*' | head -1)
