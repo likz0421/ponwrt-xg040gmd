@@ -146,10 +146,17 @@ jobs:
           PAGES="https://${OWNER}.github.io/${REPO}"
           echo "自建源: $PAGES"
           # 用 printf 不用 heredoc：GitHub 的 run 块整段缩进，heredoc 会把缩进写进文件
+          # 每条都要对应 Pages 上真实存在的 packages.adb（目录布局与官方 release 一致，
+          # 已用 ImmortalWrt 快照实测：targets/…/packages 与 packages/<arch>/<feed> 都有 .adb）。
+          # 只列确定非空的 feed：没被选中的 feed 不产包，目录里没有 .adb，列了会让
+          # apk update 报错。下面「ASSERT package indexes」保证这四条永远不会 404。
           printf '%s\n' \
             '# 本仓库 GitHub Pages 包仓库（密钥固定，可与固件同轮或跨轮更新）' \
             "@ponwrt $PAGES/targets/airoha/an7581/packages/packages.adb" \
             "@ponwrt-pkg $PAGES/packages/aarch64_cortex-a53/base/packages.adb" \
+            "@ponwrt-luci $PAGES/packages/aarch64_cortex-a53/luci/packages.adb" \
+            "@ponwrt-pon_drivers $PAGES/packages/aarch64_cortex-a53/pon_drivers/packages.adb" \
+            "@ponwrt-pon_userspace $PAGES/packages/aarch64_cortex-a53/pon_userspace/packages.adb" \
             > files/etc/apk/repositories.d/ponwrt.list
           if [ '${{ inputs.publish_repo }}' != 'true' ]; then
             sed -i 's/^@ponwrt/# @ponwrt/' files/etc/apk/repositories.d/ponwrt.list
@@ -386,6 +393,42 @@ jobs:
           cp -a ./*nokia_xg-040g-md*.itb ./*nokia_xg-040g-md*.manifest "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           ls -la "$GITHUB_WORKSPACE/out"
 
+      # ---------- 11b. 包索引：镜像里写的每条源都必须真的存在 ----------
+      # repositories.d/ponwrt.list 是构建前写死的，索引是构建后才有的；对不上的话
+      # 设备侧表现为 apk update 报错 / 永远更新不了，而固件本身看着完全正常。
+      # 所以这里把「源里列的每一条」和「本地产出的每一个 .adb」双向核对一遍。
+      - name: ASSERT package indexes
+        if: inputs.publish_repo == 'true'
+        run: |
+          set -euo pipefail
+          ARCH=aarch64_cortex-a53
+          PAGES="https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY#*/}"
+          L="$WORK/openwrt/files/etc/apk/repositories.d/ponwrt.list"
+          MISS=""
+          for u in $(grep -E '^@' "$L" | awk '{print $2}'); do
+            case "$u" in
+              "$PAGES"/*) ;;
+              *) echo "::error::源地址不是本仓库 Pages：$u（期望前缀 $PAGES/）"; exit 1 ;;
+            esac
+            p="$WORK/openwrt/bin/${u#$PAGES/}"
+            if [ -s "$p" ]; then
+              echo "✅ ${u#$PAGES/}  $(du -h "$p" | cut -f1)"
+            else
+              MISS="$MISS $u"
+            fi
+          done
+          # 反向：这四个 feed 空了说明该 feed 一个包都没编出来（上游改了配置结构）
+          for d in base luci pon_drivers pon_userspace; do
+            [ -s "$WORK/openwrt/bin/packages/$ARCH/$d/packages.adb" ] \
+              || echo "::warning::feed $d 没有索引（apk add 用不了这个 feed）"
+          done
+          if [ -n "$MISS" ]; then
+            echo "::error::镜像里写了这些源，但本次构建没产出对应索引:$MISS"
+            find "$WORK/openwrt/bin" -name packages.adb | sed 's/^/    /'
+            exit 1
+          fi
+          echo "✅ 设备侧 apk 源与本次产物一一对应"
+
       - name: Publish firmware to Release
         uses: softprops/action-gh-release@v2
         with:
@@ -399,7 +442,7 @@ jobs:
             | 主题 | ${{ env.HEADLINE }} |
             | SoC / profile | an7581 / `nokia_xg-040g-md-ubi` |
             | BTF | 构建末尾断言 vmlinux 含 `.BTF` |
-            | 额外包 | `luci-app-natmode` `luci-app-pon-status` |
+            | 额外包 | `luci-app-natmode` `luci-app-pon-status` `luci-theme-lucent` `honk` `luci-app-honk` `luci-lib-daeuniverse` |
             | 运行 | <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}> |
             刷入前先备份原厂 `bosa` / `ri` 分区（激光校准数据 + SN/MAC，丢了救不回来）。
           files: ${{ github.workspace }}/out/*
