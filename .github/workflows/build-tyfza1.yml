@@ -126,17 +126,35 @@ jobs:
         # 只改 CI 工作树里那份种子，上游仓库一个字不动。
         run: |
           set -euo pipefail
-          cd "$TYFZA1_WORK/sources/openwrt"
+          cd "$TYFZA1_WORK"
+          export TYFZA1_CONFIG="$PWD/artifacts/custom.config"
           export PATH="/usr/lib/llvm-18/bin:$PATH"
-          # 上一轮这一步死在 make tools/install：.config 还没展开过，toplevel.mk 把它
-          # 当过期目标，转手调 menuconfig，CI 无终端 → "Error opening terminal: unknown"。
-          # 上游 build.sh 自己第 33 行就是 make defconfig，我们只是提前做同一件事
-          # （defconfig 只补没答案的符号，不动我们写进去的那些）。
+          # 上一轮 kernel_oldconfig 本身跑通了，但它答的是 **mediatek/filogic** 的种子：
+          # port/scripts/prepare.sh 只 fetch 上游 openwrt@PIN，rtl9617c 这个 target 是
+          # sync-overlay.sh 才 rsync 进去的（build.sh 第 25 行 sync-overlay → 26 行
+          # prepare_luci_feeds → 33 行 make defconfig）。我们在 defconfig 之前没铺 overlay，
+          # .config 就落回基线默认机型，答的自然是别人的内核配置。
+          # 这里提前调同一条命令；它是幂等的（rsync --delete + 先 sed 删再 printf 追加），
+          # 后面 build.sh 再执行一遍不会叠加。
+          sh port/scripts/sync-overlay.sh sources/openwrt > sync-overlay.log 2>&1 || {
+            echo "::error::上游 sync-overlay 失败"; tail -30 sync-overlay.log; exit 1; }
+          [ -d sources/openwrt/target/linux/rtl9617c ] \
+            || { echo "::error::overlay 之后仍然没有 target/linux/rtl9617c"; exit 1; }
+          cd sources/openwrt
+          # tools/install 之前必须先 defconfig：否则 toplevel.mk 把 .config 当过期目标，
+          # 转手调 menuconfig，CI 无终端 → "Error opening terminal: unknown"。
           make defconfig </dev/null > "$TYFZA1_WORK/defconfig.log" 2>&1 || {
             echo "::error::make defconfig 失败"; tail -40 "$TYFZA1_WORK/defconfig.log"; exit 1; }
           grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config \
             || { echo "::error::defconfig 把 BTF 丢了（片段没生效？）"; exit 1; }
-          echo "✅ defconfig 后 BTF 仍在（.config $(grep -c '^CONFIG_' .config) 条）"
+          # 机型必须是我们那台，不然 oldconfig 答的是别的 target。
+          # 用他们 boot config 里就有的符号（archived config.buildinfo 里没有
+          # CONFIG_TARGET_BOARD 这种内部符号，拿它断言会假失败）。
+          grep -q '^CONFIG_TARGET_rtl9617c=y' .config \
+            || { echo "::error::.config 里没启用 rtl9617c：$(grep -m3 '^CONFIG_TARGET_' .config | tr '\n' ' ')"; exit 1; }
+          grep -q '^CONFIG_TARGET_rtl9617c_generic=y' .config \
+            || { echo "::error::.config 里没启用 rtl9617c/generic 子目标"; exit 1; }
+          echo "✅ defconfig 后 BTF 仍在、机型为 rtl9617c（.config $(grep -c '^CONFIG_' .config) 条）"
           make tools/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-tools.log" 2>&1 || {
             echo "::error::tools/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-tools.log"; exit 1; }
           make kernel_oldconfig -j1 V=s </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {
@@ -151,13 +169,13 @@ jobs:
             ls staging_dir/host/bin 2>/dev/null | grep -E '^(bison|flex|perl|quilt|patch)' | tr '\n' ' ' || echo "（host bin 里没有 kconfig 要用的工具）"; echo
             ls -d build_dir/*/linux-* 2>/dev/null || echo "（内核还没解包/打补丁）"
             exit 1; }
-          echo "=== 种子配置因此新增的行（只在工作树里）==="
-          git diff --stat -- target/linux || true
-          git diff -- target/linux | grep -E '^\+[^+]' | head -25 || true
-          # 权威判据用 oldconfig 生成出来的那份内核 .config（种子可能落在 target 级
-          # 也可能落在 generic 子目标级，逐个翻文件反而容易认错）。
-          KC=$(find build_dir -maxdepth 4 -type f -name .config -path '*linux-6.18*' | head -1)
-          [ -n "$KC" ] || { echo "::error::找不到 oldconfig 生成的内核 .config"; ls -d build_dir/*/linux-* 2>/dev/null; exit 1; }
+          echo "=== 种子配置因此新增的行（只在工作树里，只看我们这台）==="
+          git diff --stat -- target/linux/rtl9617c || true
+          git diff -- target/linux/rtl9617c | grep -E '^\+[^+]' | head -25 || true
+          # 权威判据用 oldconfig 生成出来的那份内核 .config，并且按机型路径找 ——
+          # 上一轮就是被一个不限机型的 find 骗到（*linux-6.18* 先命中了 mediatek）。
+          KC=$(find build_dir -maxdepth 5 -type f -name .config -path '*linux-rtl9617c*' | head -1)
+          [ -n "$KC" ] || { echo "::error::找不到 rtl9617c 的内核 .config"; ls -d build_dir/*/linux-* 2>/dev/null; exit 1; }
           echo "=== $KC 里的关键答案 ==="
           grep -E '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|BPF_EVENTS)=y|^# CONFIG_DEBUG_INFO_REDUCED is not set' "$KC"
           grep -q '^CONFIG_DEBUG_INFO=y' "$KC" || { echo "::error::内核 DEBUG_INFO 没被回答，BTF 不会生效"; exit 1; }
