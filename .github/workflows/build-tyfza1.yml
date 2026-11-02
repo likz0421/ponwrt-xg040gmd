@@ -116,6 +116,37 @@ jobs:
             "$TYFZA1_WORK/sources/openwrt" "$TYFZA1_WORK" \
             "$GITHUB_WORKSPACE/ctrl" "$TYFZA1_WORK/artifacts/custom.config"
 
+      - name: Answer kernel symbols unmasked by BTF/FTRACE
+        # 上一轮真错误：内核 syncconfig 走到
+        #   TYFZA1 USB presence and activity LED (LEDS_TRIGGER_TYFZA1_USB) [N/m/?] (NEW)
+        #   scripts/kconfig/Makefile:85: syncconfig Error 1
+        # 我们把 DEBUG_INFO/BTF/FTRACE 打开后，被"解锁"出来的新符号在 rtl9617c 的
+        # 内核种子配置里没有答案；而 OpenWrt 编内核时带 FAIL_ON_UNCONFIGURED=1
+        # （include/kernel-build.mk:178），syncconfig 见 NEW 就报错，不会自己取默认值。
+        # 官方对策就是 make target/linux/oldconfig：用默认值回答，再把结果写回种子
+        # （include/target.mk:181 LINUX_RECONFIG_TARGET = target/linux/<tail>/config-*）。
+        # 只改 CI 工作树里那份种子，上游仓库一个字不动。
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK/sources/openwrt"
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          make tools/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-tools.log" 2>&1 || {
+            echo "::error::tools/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-tools.log"; exit 1; }
+          make target/linux/oldconfig </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {
+            echo "::error::make target/linux/oldconfig 失败"; tail -60 "$TYFZA1_WORK/oldconfig.log"; exit 1; }
+          echo "=== 种子配置因此新增的行（只在工作树里）==="
+          git diff --stat -- target/linux || true
+          git diff -- target/linux | grep -E '^\+[^+]' | head -25 || true
+          # 权威判据用 oldconfig 生成出来的那份内核 .config（种子可能落在 target 级
+          # 也可能落在 generic 子目标级，逐个翻文件反而容易认错）。
+          KC=$(find build_dir -maxdepth 4 -type f -name .config -path '*linux-6.18*' | head -1)
+          [ -n "$KC" ] || { echo "::error::找不到 oldconfig 生成的内核 .config"; ls -d build_dir/*/linux-* 2>/dev/null; exit 1; }
+          echo "=== $KC 里的关键答案 ==="
+          grep -E '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|BPF_EVENTS)=y|^# CONFIG_DEBUG_INFO_REDUCED is not set' "$KC"
+          grep -q '^CONFIG_DEBUG_INFO=y' "$KC" || { echo "::error::内核 DEBUG_INFO 没被回答，BTF 不会生效"; exit 1; }
+          grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KC" || { echo "::error::内核 BTF 没被回答，honk 起不来"; exit 1; }
+          echo "✅ 内核符号已全部有答案（下一步不会再卡在 syncconfig）"
+
       - name: Build OpenWrt and native PE
         run: |
           set -euo pipefail
