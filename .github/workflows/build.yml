@@ -317,8 +317,9 @@ jobs:
             fi
           done
           echo "--- 产物 ---"
-          # package/custom 不是 feed，按 include/feeds.mk 的 PACKAGE_SUBDIRS 归属，
-          # 产物落在 bin/targets/<tail>/packages 而不是 bin/packages/<arch>/*，两处都要查。
+          # 实测归属（上一轮的错误日志给的答案）：非 feed 的 package/custom 在
+          # bin/packages/aarch64_cortex-a53/base/honk-<版本>-r1.apk，target 目录里主要是
+          # kernel / 机型专属包。两边都查，不再凭 "自定义包一定在 target 下" 的猜测判。
           find bin/packages bin/targets \( -name 'honk-*.apk' -o -name 'luci-app-honk*.apk' \
                -o -name 'luci-lib-daeuniverse*.apk' -o -name 'luci-app-natmode*.apk' \
                -o -name 'luci-app-pon-status*.apk' -o -name 'luci-theme-lucent*.apk' \) 2>/dev/null | sed 's/^/  /'

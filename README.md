@@ -70,7 +70,9 @@ config KERNEL_DEBUG_INFO_BTF
      （设备里已预置成 `@ponwrt`，`apk update && apk upgrade` 只认你自己这套）
      除 target 目录外还列了 4 个 feed 源，目录布局与官方 release 一致：
      `@ponwrt-pkg`=packages/…/base、`@ponwrt-luci`=…/luci、`@ponwrt-pon_drivers`、`@ponwrt-pon_userspace`。
-     我们的自定义包（honk / natmode / pon-status / lucent）不属于 feed，落在 target 目录，所以走 `@ponwrt`。
+     我们的自定义包（honk / natmode / pon-status / lucent）实测落在
+     `bin/packages/aarch64_cortex-a53/base/`（构建日志里的产物路径就是那里），所以走 `@ponwrt-pkg`；
+     `@ponwrt` 那条覆盖 kernel 与机型专属包。
      每一条都有「ASSERT package indexes」对照本次真实产出的 `.adb`，写了源却没索引会直接红。
 
 ## 构建里的硬断言（任何一条不过就失败，不出"看起来成功"的残缺固件）
