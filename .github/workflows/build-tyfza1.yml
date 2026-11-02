@@ -11,13 +11,8 @@ name: build-tyfza1
 
 on:
   workflow_dispatch:
-    inputs:
-      add_lucent_theme:
-        description: '顺带把 luci-theme-lucent 编进去（阶段1先不加，跑通再说）'
-        required: false
-        default: 'false'
-        type: choice
-        options: ['false', 'true']
+    # 没有开关：这台机器要加的就是 eBPF/BTF + honk + 我自己的主题，
+    # stage-tyfza1.sh 三件都会放，成品断言也按这三件查。
 
 permissions:
   contents: write
