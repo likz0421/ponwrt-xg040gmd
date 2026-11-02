@@ -232,9 +232,26 @@ jobs:
           cd "$WORK/openwrt"
           JOBS=$(awk -v p="$(nproc)" '/^MemAvailable:/{m=int($2/2097152)+1} END{print m<p?m:p}' /proc/meminfo)
           JOBS=$(( JOBS < 1 ? 1 : JOBS ))
-          echo "=== 先建 tools + toolchain（world 的前半段）==="
-          make tools/install -j"$JOBS" 2>&1 | tail -3
-          make toolchain/install -j"$JOBS" 2>&1 | tail -3
+          # 前置必须是 tools → toolchain → target/compile：
+          # 孤立 make package/X/compile 时，带 kmod 依赖的包会去要
+          # build_dir/.../linux-*/.config，而那个文件由 target/compile 生成，
+          # 缺了就报 "No rule to make target ... .config / gpio-button-hotplug failed"。
+          # 这三步都是 world 本来就要做的，只是提前做，不重复花时间。
+          echo "=== 前置：tools / toolchain / 内核 ==="
+          make tools/install -j"$JOBS" 2>&1 | tail -2
+          make toolchain/install -j"$JOBS" 2>&1 | tail -2
+          make target/compile -j"$JOBS" 2>&1 | tail -2
+          echo "=== honk 资产：下载校验 + 解包 + 安装路径必须存在（上次断在这）==="
+          make package/custom/honk/download -j1 2>&1 | tail -3
+          make package/custom/honk/prepare -j1 2>&1 | tail -3
+          DIST=$(sed -n 's|^HONK_DIST:=\$(PKG_BUILD_DIR)/\(.*\)$|\1|p' package/custom/honk/Makefile)
+          BD=$(find build_dir -maxdepth 1 -type d -name 'honk-*' | head -1)
+          [ -n "$BD" ] && [ -n "$DIST" ] || { echo "::error::没找到解包目录（BD=$BD DIST=$DIST）"; exit 1; }
+          for f in "$BD/$DIST/honk-core" "$BD/$DIST/LICENSE" package/custom/honk/files/honk.init \
+                   package/custom/honk/files/honk.config package/custom/honk/files/config.dae; do
+            [ -s "$f" ] || { echo "::error::生成的 honk/Makefile 要装的文件不存在: $f"; exit 1; }
+          done
+          echo "✅ honk 安装源齐备（honk-core $(du -h "$BD/$DIST/honk-core" | cut -f1)）"
           for p in honk luci-app-honk luci-lib-daeuniverse luci-app-natmode luci-app-pon-status luci-theme-lucent; do
             if make "package/custom/$p/compile" -j1 >/dev/null 2>&1; then
               echo "✅ $p 编过"
