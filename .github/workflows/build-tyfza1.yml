@@ -177,11 +177,18 @@ jobs:
             || { echo "::error::OpenWrt 合并后的内核 .config 里没有 BTF（我们的 CONFIG_KERNEL_DEBUG_INFO_BTF 没进内核配置）"; exit 1; }
           echo "✅ 内核 .config 已含覆盖（含 BTF）：$KD/.config"
           echo "=== 2) 在这份带覆盖的 .config 上把 (NEW) 符号按默认值答完 ==="
-          # 必须是 olddefconfig：oldconfig 会对每个 NEW 提问，喂 </dev/null 时 kconfig
-          # 直接 "Error in reading or end of file." 退出（上一轮就这样，BTF 被中途丢弃）；
-          # 也别用 `yes '' | make`——pipefail 会把 yes 的 SIGPIPE 当成失败。
-          # olddefconfig 不问问题，NEW 一律取默认值并写回文件。
-          ( cd "$KD" && make ARCH=arm64 olddefconfig < /dev/null ) > "$TYFZA1_WORK/koldconfig.log" 2>&1 || {
+          # 必须是 olddefconfig：oldconfig 会逐个提问 NEW 符号，喂 </dev/null 时 kconfig
+          # 直接 "Error in reading or end of file." 中途退出（上一轮就这样）。
+          # PATH 里必须带上 staging_dir/host/bin —— 6.18 的
+          # lib/Kconfig.debug:382 是 `depends on PAHOLE_VERSION >= 116`，没有
+          # "量不到就放行" 的退路：pahole 不在 PATH 时 PAHOLE_VERSION=0，
+          # kconfig 会把 DEBUG_INFO_BTF 当不可见符号**静默丢掉**。OpenWrt 自己编内核
+          # 时 pahole 是现成的（tools/dwarves 由 CONFIG_DWARVES 选中并编进 staging_dir），
+          # 所以我们手工调 kconfig 时必须复现同一个环境，否则是在给自己造一个假失败。
+          HOSTBIN="$PWD/staging_dir/host/bin"
+          [ -x "$HOSTBIN/pahole" ] || { echo "::error::$HOSTBIN/pahole 不存在（tools/dwarves 没编出来？）"; ls "$HOSTBIN" | grep -i pahole || true; exit 1; }
+          "$HOSTBIN/pahole" --version | head -1
+          ( cd "$KD" && PATH="$HOSTBIN:$PATH" make ARCH=arm64 olddefconfig < /dev/null ) > "$TYFZA1_WORK/koldconfig.log" 2>&1 || {
             echo "::error::内核 olddefconfig 失败"; tail -60 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
           grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KD/.config" || {
             echo "::error::补答后 BTF 反被丢掉（它的某条依赖在这个内核里不成立）"
@@ -191,9 +198,13 @@ jobs:
           echo "=== 3) 把相对种子新增的答案写回种子（只动 CI 工作树）==="
           SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
           [ -n "$SEED" ] || { echo "::error::找不到 rtl9617c 的内核种子配置"; exit 1; }
-          # '>' = config_diff（在右边、与左边不同项），和 LINUX_RECONF_DIFF 同一条语义
-          scripts/kconfig.pl '>' "$SEED" "$KD/.config" > "$TYFZA1_WORK/seed-add.conf" 2> "$TYFZA1_WORK/kconfig.warn" || {
+          # '>' = config_diff（在右边、与左边不同项），和 LINUX_RECONF_DIFF 同一条语义。
+          # CONFIG_PAHOLE_VERSION 是 kconfig 每次用 $(shell pahole --version) 现算的派生值，
+          # 写进种子只是噪音（还可能把版本钉死），过滤掉。分两步写：
+          # `kconfig.pl | grep -v` 在 pipefail 下会因为 grep 没匹配（返回 1）而假报错。
+          scripts/kconfig.pl '>' "$SEED" "$KD/.config" > "$TYFZA1_WORK/seed-add.raw" 2> "$TYFZA1_WORK/kconfig.warn" || {
             echo "::error::kconfig.pl 求差失败"; cat "$TYFZA1_WORK/kconfig.warn"; exit 1; }
+          grep -v '^CONFIG_PAHOLE_VERSION=' "$TYFZA1_WORK/seed-add.raw" > "$TYFZA1_WORK/seed-add.conf" || true
           ADD=$(grep -c . "$TYFZA1_WORK/seed-add.conf" || true)
           echo "写回 $SEED：新增/变更 $ADD 行"
           sed -n '1,15p' "$TYFZA1_WORK/seed-add.conf" | sed 's/^/    /'
