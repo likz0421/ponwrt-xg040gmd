@@ -213,7 +213,13 @@ jobs:
           KC=$(find build_dir -maxdepth 5 -type f -name .config -path '*linux-rtl9617c*' | head -1)
           grep -E '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|BPF_EVENTS)=y|^# CONFIG_DEBUG_INFO_REDUCED is not set' "$KC"
           grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KC" || { echo "::error::重编后 BTF 又丢了（被 override 覆盖？$KC）"; exit 1; }
-          echo "✅ 内核带着 BTF 编过了，build.sh 那步不会卡在 syncconfig"
+          # honk 的内核前提逐条查实（BPF/BPF_SYSCALL/BPF_JIT 来自 generic 种子，
+          # NET_XGRESS 来自 rtl9617c 自己的种子；CGROUP_BPF 是 default y，
+          # 只有生成出来的 .config 里才看得见，所以在这儿断言而不是猜）
+          for s in CONFIG_BPF=y CONFIG_BPF_SYSCALL=y CONFIG_BPF_JIT=y CONFIG_NET_XGRESS=y CONFIG_CGROUP_BPF=y; do
+            grep -qx "$s" "$KC" || { echo "::error::内核缺 honk 需要的前提：$s（$KC）"; grep -nE "^#? *CONFIG_(CGROUP_BPF|NET_XGRESS|BPF_SYSCALL)" "$KC" | head; exit 1; }
+          done
+          echo "✅ 内核带着 BTF 与 eBPF 前提编过了，build.sh 那步不会卡在 syncconfig"
 
       - name: Build OpenWrt and native PE
         run: |
