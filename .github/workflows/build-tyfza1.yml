@@ -136,8 +136,18 @@ jobs:
           echo "✅ defconfig 后 BTF 仍在（.config $(grep -c '^CONFIG_' .config) 条）"
           make tools/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-tools.log" 2>&1 || {
             echo "::error::tools/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-tools.log"; exit 1; }
-          make target/linux/oldconfig </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {
-            echo "::error::make target/linux/oldconfig 失败"; tail -60 "$TYFZA1_WORK/oldconfig.log"; exit 1; }
+          make target/linux/oldconfig -j1 V=s </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {
+            echo "::error::make target/linux/oldconfig 失败（V=s 全量日志如下）"
+            echo "----- 日志 $(wc -l < "$TYFZA1_WORK/oldconfig.log") 行；先给错误行 -----"
+            grep -nE '\*\*\*|[Ee]rror|No rule|not found|cannot|Permission' \
+              "$TYFZA1_WORK/oldconfig.log" | head -25 || true
+            echo "----- 全量（末尾 200 行）-----"
+            tail -200 "$TYFZA1_WORK/oldconfig.log"
+            echo "----- 现场 -----"
+            ls -l dl/ 2>/dev/null | grep -iE 'linux|6\.18' | head -5 || echo "dl/ 里没有内核包"
+            ls staging_dir/host/bin 2>/dev/null | grep -E '^(bison|flex|perl|quilt|patch)' | tr '\n' ' ' || echo "（host bin 里没有 kconfig 要用的工具）"; echo
+            ls -d build_dir/*/linux-* 2>/dev/null || echo "（内核还没解包/打补丁）"
+            exit 1; }
           echo "=== 种子配置因此新增的行（只在工作树里）==="
           git diff --stat -- target/linux || true
           git diff -- target/linux | grep -E '^\+[^+]' | head -25 || true
