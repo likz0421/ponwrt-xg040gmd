@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "architecture": "aarch64_cortex-a53",
+  "packages": {
+    "cgi-io": "2026.07.21~31cb3c89-r1",
+    "conntrack": "1.4.8-r1",
+    "coreutils": "9.11-r1",
+    "coreutils-timeout": "9.11-r1",
+    "i2c-tools": "4.4-r2",
+    "iperf3": "3.22-r1",
+    "libi2c": "4.4-r2",
+    "libiperf3": "3.22-r1",
+    "libnetfilter-cthelper": "1.0.0-r2",
+    "libnetfilter-cttimeout": "1.0.0-r2",
+    "libnetfilter-queue": "1.0.5-r4",
+    "v2ray-geoip": "202610050438-r1",
+    "v2ray-geosite": "20261009101206-r1",
+    "wget-ssl": "1.25.0-r5"
+  }
+}
