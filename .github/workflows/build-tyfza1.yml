@@ -170,16 +170,24 @@ jobs:
           [ -s "$KD/.config" ] || { echo "::error::$KD/.config 没生成（configure 没跑到）"; tail -60 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
           grep -q '^CONFIG_DEBUG_INFO=y' "$KD/.config" \
             || { echo "::error::内核 .config 里没有我们的 DEBUG_INFO 覆盖"; tail -60 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
-          echo "✅ 内核 .config 已含覆盖：$KD/.config"
-          echo "=== 2) 在这份带覆盖的 .config 上按默认值补答 (NEW) 符号 ==="
-          # 用 </dev/null 而不是 `yes '' | make`：pipefail 会让 yes 的 SIGPIPE 变成假失败
-          ( cd "$KD" && make ARCH=arm64 oldconfig < /dev/null ) > "$TYFZA1_WORK/koldconfig.log" 2>&1 || {
-            echo "::error::内核 oldconfig 失败"; tail -60 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
+          echo "=== OpenWrt 自己合并出来的内核配置（动它之前先拍照）==="
+          grep -nE '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF|BPF_SYSCALL|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|PAHOLE_VERSION)(=| )|^# CONFIG_(DEBUG_INFO_REDUCED|DEBUG_INFO_BTF) is not set' "$KD/.config" | head -14
+          # 这一步才是真判据：合并完就该有 BTF；没有说明问题在我们的覆盖/依赖，不是补答的问题
+          grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KD/.config" \
+            || { echo "::error::OpenWrt 合并后的内核 .config 里没有 BTF（我们的 CONFIG_KERNEL_DEBUG_INFO_BTF 没进内核配置）"; exit 1; }
+          echo "✅ 内核 .config 已含覆盖（含 BTF）：$KD/.config"
+          echo "=== 2) 在这份带覆盖的 .config 上把 (NEW) 符号按默认值答完 ==="
+          # 必须是 olddefconfig：oldconfig 会对每个 NEW 提问，喂 </dev/null 时 kconfig
+          # 直接 "Error in reading or end of file." 退出（上一轮就这样，BTF 被中途丢弃）；
+          # 也别用 `yes '' | make`——pipefail 会把 yes 的 SIGPIPE 当成失败。
+          # olddefconfig 不问问题，NEW 一律取默认值并写回文件。
+          ( cd "$KD" && make ARCH=arm64 olddefconfig < /dev/null ) > "$TYFZA1_WORK/koldconfig.log" 2>&1 || {
+            echo "::error::内核 olddefconfig 失败"; tail -60 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
           grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KD/.config" || {
-            echo "::error::补答后 BTF 仍未启用（依赖没满足？）"
-            grep -nE 'CONFIG_DEBUG_INFO|CONFIG_FTRACE|CONFIG_PAHOLE' "$KD/.config" | head -12
+            echo "::error::补答后 BTF 反被丢掉（它的某条依赖在这个内核里不成立）"
+            grep -nE 'CONFIG_DEBUG_INFO|CONFIG_BPF_SYSCALL|CONFIG_FTRACE|CONFIG_PAHOLE' "$KD/.config" | head -16
             tail -30 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
-          echo "✅ BTF / DEBUG_INFO 已在内核 .config 里答上"
+          echo "✅ BTF / DEBUG_INFO 已在内核 .config 里答上（olddefconfig 后仍在）"
           echo "=== 3) 把相对种子新增的答案写回种子（只动 CI 工作树）==="
           SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
           [ -n "$SEED" ] || { echo "::error::找不到 rtl9617c 的内核种子配置"; exit 1; }
