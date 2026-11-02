@@ -115,6 +115,12 @@ config KERNEL_DEBUG_INFO_BTF
   确认 dropbear 还能进之后再 `/etc/init.d/honk enable && start`。
 - 他们 bump 版本后 release 资产 URL 或 hash 变了，buildroot 下载/校验会直接失败，
   不会静默少装；升级 = 改 `honk-manifest.txt` 里的版本与 sha256。
+- 也可以直接吃他们的在线源：镜像内置 `@daeuniverse`
+  （`files/etc/apk/repositories.d/daeuniverse.list`，公钥 `files/etc/apk/keys/daeuniverse.pem`，
+  sha256 钉在 manifest，构建时与锁定 feed 里那份逐字节核对）。装出来的同名包会由 apk 正常接管
+  并登记数据库：`apk update && apk add --force honk@daeuniverse`。
+  他们的 `kmods/…` 那行**故意不写**：那是给他们自己编的内核用的，且我们这个机型是 404。
+  URL 里版本号写死 `25.12` —— PonWrt 的 `DISTRIB_RELEASE` 是 `SNAPSHOT`，照官网那条命令拼必 404。
 
 内核前提已满足：构建会断言 `vmlinux` 含 `.BTF`，设备上 `ls /sys/kernel/btf/vmlinux`
 应有文件；`bpffs` 由 base-files 的 `/etc/init.d/boot` 自动挂载。

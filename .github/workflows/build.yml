@@ -167,6 +167,42 @@ jobs:
           cat "$GITHUB_WORKSPACE/ctrl/configs/xg-040g-md.diff.config" >> .config
           echo "基座 $(wc -l < configs/an7581.config) 行；差异追加 $(grep -cE '^[A-Z]' "$GITHUB_WORKSPACE/ctrl/configs/xg-040g-md.diff.config") 个符号"
 
+      # ---------- 7a. 设备上的 @daeuniverse 在线源（honk 的升级渠道）----------
+      # 源列表和公钥是提交在本仓库 files/ 里的静态文件，但它们随时可能和上游脱节：
+      # 对方换钥匙 → apk 验签失败；对方版本号换掉（我们写死 25.12）→ URL 404。
+      # 写了源却更新不了，比没有源更糟糕（apk update 会一路报错），所以每次构建现场核对。
+      - name: Verify daeuniverse apk source
+        run: |
+          set -euo pipefail
+          K="$WORK/openwrt/files/etc/apk/keys/daeuniverse.pem"
+          L="$WORK/openwrt/files/etc/apk/repositories.d/daeuniverse.list"
+          [ -s "$K" ] || { echo "::error::overlay 里缺 $K"; exit 1; }
+          [ -s "$L" ] || { echo "::error::overlay 里缺 $L"; exit 1; }
+          head -1 "$K" | grep -q 'BEGIN PUBLIC KEY' || { echo "::error::$K 不是 PEM 公钥"; exit 1; }
+          # CRLF 会让 URL 尾巴带 \r，设备上的表现是一个查不出原因的 404
+          for f in "$K" "$L"; do
+            a=$(wc -c < "$f"); b=$(tr -d '\r' < "$f" | wc -c)
+            [ "$a" = "$b" ] || { echo "::error::$f 含 CRLF（$a vs $b 字节）"; exit 1; }
+          done
+          WANT=$(awk '$1 ~ /^@/ {print $2; exit}' "$L")
+          [ -n "$WANT" ] || { echo "::error::$L 里没有 @… 源行"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 -I "$WANT" || echo 000)
+          [ "$code" = 200 ] || { echo "::error::在线源不可达 HTTP $code：$WANT"; exit 1; }
+          echo "✅ 在线源可达 $WANT"
+          PIN=$(sed -n 's|^DAEUNIV_KEY_SHA256=\([0-9a-f]*\).*|\1|p' "$GITHUB_WORKSPACE/ctrl/honk-manifest.txt")
+          DSHA=$(sed -n 's|^DAEUNIV_SHA=\([0-9a-f]*\).*|\1|p' "$GITHUB_WORKSPACE/ctrl/honk-manifest.txt")
+          [ "${#PIN}" = 64 ] || { echo "::error::honk-manifest.txt 缺/坏 DAEUNIV_KEY_SHA256"; exit 1; }
+          [ "${#DSHA}" = 40 ] || { echo "::error::honk-manifest.txt 缺/坏 DAEUNIV_SHA"; exit 1; }
+          LOCAL=$(sha256sum "$K" | cut -d' ' -f1)
+          [ "$LOCAL" = "$PIN" ] || { echo "::error::内置公钥 sha256 $LOCAL ≠ 锁定值 $PIN（上游换钥匙了）"; exit 1; }
+          # 再和「给那个索引签名的那把钥匙」核对：feed 仓库里 keys/public-key.pem 的 git blob
+          FEEDKEY=$(curl -s --max-time 25 \
+            "https://raw.githubusercontent.com/daeuniverse/openwrt-packages/$DSHA/keys/public-key.pem" \
+            | sha256sum | cut -d' ' -f1)
+          [ "$FEEDKEY" = "$LOCAL" ] \
+            || { echo "::error::内置公钥与锁定 feed(${DSHA:0:7}) 里的 keys/public-key.pem 不一致：feed=$FEEDKEY local=$LOCAL"; exit 1; }
+          echo "✅ 公钥三方一致（镜像内置 / 锁定值 / feed blob）sha256=$LOCAL"
+
       # ---------- 7b. honk 进固件：生成 in-tree 包（二进制取官方 release 资产，
       #      由 buildroot 下载并按 PKG_HASH 校验；LuCI 侧取锁定 SHA 的源码）----------
       - name: Stage honk packages
@@ -252,13 +288,17 @@ jobs:
           make package/custom/honk/download -j1 2>&1 | tail -3
           make package/custom/honk/prepare -j1 2>&1 | tail -3
           DIST=$(sed -n 's|^HONK_DIST:=\$(PKG_BUILD_DIR)/\(.*\)$|\1|p' package/custom/honk/Makefile)
-          BD=$(find build_dir -maxdepth 1 -type d -name 'honk-*' | head -1)
-          [ -n "$BD" ] && [ -n "$DIST" ] || { echo "::error::没找到解包目录（BD=$BD DIST=$DIST）"; exit 1; }
-          for f in "$BD/$DIST/honk-core" "$BD/$DIST/LICENSE" package/custom/honk/files/honk.init \
+          HONK_FILE=$(sed -n 's|^HONK_FILE=\(.*\)$|\1|p' "$GITHUB_WORKSPACE/ctrl/honk-manifest.txt")
+          [ -n "$HONK_FILE" ] || { echo "::error::honk-manifest.txt 里取不到 HONK_FILE"; exit 1; }
+          # 解包目录是 build_dir/target-*/honk-<版本>/<资产名>，在 build_dir 下第二层，
+          # 上一轮用 -maxdepth 1 找 'honk-*' 永远为空（自己把自己判死了）。
+          BD=$(find build_dir -type d -name "$DIST" -print -quit 2>/dev/null)
+          [ -n "$BD" ] && [ -n "$DIST" ] || { echo "::error::没找到解包目录（BD=[$BD] DIST=[$DIST]）"; find build_dir -maxdepth 2 -type d -name 'honk*' | head; exit 1; }
+          for f in "$BD/$HONK_FILE" "$BD/LICENSE" package/custom/honk/files/honk.init \
                    package/custom/honk/files/honk.config package/custom/honk/files/config.dae; do
             [ -s "$f" ] || { echo "::error::生成的 honk/Makefile 要装的文件不存在: $f"; exit 1; }
           done
-          echo "✅ honk 安装源齐备（honk-core $(du -h "$BD/$DIST/honk-core" | cut -f1)）"
+          echo "✅ honk 安装源齐备（$BD/$HONK_FILE $(du -h "$BD/$HONK_FILE" | cut -f1)）"
           for p in honk luci-app-honk luci-lib-daeuniverse luci-app-natmode luci-app-pon-status luci-theme-lucent; do
             if make "package/custom/$p/compile" -j1 >/dev/null 2>&1; then
               echo "✅ $p 编过"
@@ -269,9 +309,15 @@ jobs:
             fi
           done
           echo "--- 产物 ---"
-          find bin/packages bin/targets -name 'honk-*.apk' -o -name 'luci-app-honk*.apk' -o -name 'luci-theme-lucent*.apk' 2>/dev/null | head -8
-          N=$(find bin/packages -name 'honk-*.apk' 2>/dev/null | wc -l)
-          [ "$N" -ge 1 ] || { echo "::error::honk 包没编出来"; exit 1; }
+          # package/custom 不是 feed，按 include/feeds.mk 的 PACKAGE_SUBDIRS 归属，
+          # 产物落在 bin/targets/<tail>/packages 而不是 bin/packages/<arch>/*，两处都要查。
+          find bin/packages bin/targets \( -name 'honk-*.apk' -o -name 'luci-app-honk*.apk' \
+               -o -name 'luci-lib-daeuniverse*.apk' -o -name 'luci-app-natmode*.apk' \
+               -o -name 'luci-app-pon-status*.apk' -o -name 'luci-theme-lucent*.apk' \) 2>/dev/null | sed 's/^/  /'
+          for p in honk luci-app-honk luci-lib-daeuniverse luci-app-natmode luci-app-pon-status luci-theme-lucent; do
+            find bin/packages bin/targets -name "$p*.apk" 2>/dev/null | grep -q . \
+              || { echo "::error::$p 没编出 .apk"; exit 1; }
+          done
           echo "✅ 自加包全部编出"
 
       # ---------- 9. 下载 + 编译 ----------
@@ -327,7 +373,8 @@ jobs:
           # 包列表以 rootfs 的 apk 数据库为准：那才是"镜像里到底装了什么"的权威来源。
           # manifest 有过两次误判：它是 SoC 级汇总（不含机型专属的 kmod-airoha-en7572），
           # 且 C++ 运行时在包数据库里叫 libstdc++ 而不是符号名 libstdcpp。
-          ROOTFS=$(find build_dir -maxdepth 1 -type d -name 'root-airoha*' | head -1)
+          # root-airoha 在 build_dir/target-*/ 下面（深度 2），-maxdepth 1 会找不到
+          ROOTFS=$(find build_dir -maxdepth 2 -type d -name 'root-airoha*' | head -1)
           DB=""
           [ -n "$ROOTFS" ] && [ -f "$ROOTFS/lib/apk/db/installed" ] && DB="$ROOTFS/lib/apk/db/installed"
           [ -n "$DB" ] && echo "以 $DB 为准" || echo "::warning::没有 apk installed 库，退回用 manifest 文本判"
@@ -345,21 +392,30 @@ jobs:
           done
           [ -z "$MISS" ] || { echo "::error::成品镜像缺这些包:$MISS"; exit 1; }
           echo "✅ 成品包列表齐全（判据：${DB:-manifest}）"
+          [ -n "$ROOTFS" ] || { echo "::error::找不到装配中的 rootfs（build_dir/target-*/root-airoha*）"; exit 1; }
           # honk 是解包进 rootfs 的（不是首启安装），直接查镜像装配目录里的实体文件
           MISSBIN=""
           for f in usr/bin/honk-core etc/init.d/honk etc/config/honk etc/honk/config.dae; do
-            found=$(find build_dir -type f -path "*root-airoha*/$f" 2>/dev/null | head -1)
-            [ -n "$found" ] || MISSBIN="$MISSBIN $f"
+            [ -s "$ROOTFS/$f" ] || MISSBIN="$MISSBIN $f"
           done
-          if [ -n "$MISSBIN" ]; then
-            echo "::error::rootfs 里缺这些 honk 文件:$MISSBIN"
-            find build_dir -maxdepth 1 -type d -name 'root-airoha*'
+          [ -n "$MISSBIN" ] && { echo "::error::rootfs 里缺这些 honk 文件:$MISSBIN"; exit 1; }
+          echo "✅ honk 已在 rootfs：$ROOTFS/usr/bin/honk-core $(du -h "$ROOTFS/usr/bin/honk-core" | cut -f1)"
+          # LuCI 侧也要有，否则固件里没有配置界面
+          ls "$ROOTFS"/usr/share/luci/menu.d/*honk* >/dev/null 2>&1 \
+            || echo "::warning::rootfs 里没找到 honk 的 LuCI menu.d 条目（界面可能进不去，检查 luci-app-honk 载荷）"
+          # files/ 覆盖层里的 apk 源与公钥也必须真的落进镜像：
+          # 少了它们，设备上的 apk update 只会对着不存在的源报错（构建却是绿的）。
+          MISSREPO=""
+          for f in etc/apk/repositories.d/ponwrt.list etc/apk/repositories.d/daeuniverse.list \
+                   etc/apk/keys/daeuniverse.pem etc/apk/repositories.d/distfeeds.list; do
+            [ -s "$ROOTFS/$f" ] || MISSREPO="$MISSREPO $f"
+          done
+          if [ -n "$MISSREPO" ]; then
+            echo "::error::rootfs 里缺这些 apk 源文件:$MISSREPO"
+            ls -l "$ROOTFS/etc/apk/repositories.d" "$ROOTFS/etc/apk/keys" 2>&1 | sed 's/^/  /'
             exit 1
           fi
-          echo "✅ honk 已在 rootfs：$(find build_dir -type f -path '*root-airoha*/usr/bin/honk-core' | head -1) $(du -h "$(find build_dir -type f -path '*root-airoha*/usr/bin/honk-core' | head -1)" | cut -f1)"
-          # LuCI 侧也要有，否则固件里没有配置界面
-          find build_dir -type f -path '*root-airoha*/usr/share/luci/menu.d/*honk*' | grep -q . \
-            || echo "::warning::rootfs 里没找到 honk 的 LuCI menu.d 条目（界面可能进不去，检查 luci-app-honk 载荷）"
+          echo "✅ 设备侧 apk 源与公钥已进镜像：$(grep -hE '^@' "$ROOTFS"/etc/apk/repositories.d/*.list | wc -l) 条源"
           # 内核自带 BTF，不该出现 blob 版 vmlinux-btf
           if grep -qE '^vmlinux-btf - ' "$MAN"; then
             echo "::error::成品里装了 blob 版 vmlinux-btf（我们该用 vmlinux-btf-builtin）"; exit 1

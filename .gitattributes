@@ -1,0 +1,6 @@
+# 落进设备的东西一律 LF：repositories.d/*.list 里多一个 \r，
+# apk 读到的 URL 结尾就带 CR，设备上表现为一个查不出原因的 404。
+* text=auto eol=lf
+*.pem -text
+*.patch text eol=lf
+*.diff text eol=lf

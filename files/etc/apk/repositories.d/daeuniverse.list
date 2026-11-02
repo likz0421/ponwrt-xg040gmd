@@ -1,0 +1,7 @@
+# daeuniverse 官方 apk 仓库：honk / dae 的在线升级来源。
+# 公钥是同仓库 keys/public-key.pem（本镜像内置 /etc/apk/keys/daeuniverse.pem，
+# sha256 记在 honk-manifest.txt，构建时会与锁定 feed SHA 里那份逐字节比对）。
+#
+# 不写 kmods/ 那一行：那是给他们自己编的内核用的（本固件内核自编 + 开 BTF，
+# vermagic 不同，装不上），而且 airoha/an7581 那条路径现在就是 404。
+@daeuniverse https://openwrt.daeuniverse.org/25.12/packages/aarch64_cortex-a53/packages.adb
