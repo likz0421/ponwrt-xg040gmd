@@ -125,6 +125,15 @@ jobs:
           set -euo pipefail
           cd "$TYFZA1_WORK/sources/openwrt"
           export PATH="/usr/lib/llvm-18/bin:$PATH"
+          # 上一轮这一步死在 make tools/install：.config 还没展开过，toplevel.mk 把它
+          # 当过期目标，转手调 menuconfig，CI 无终端 → "Error opening terminal: unknown"。
+          # 上游 build.sh 自己第 33 行就是 make defconfig，我们只是提前做同一件事
+          # （defconfig 只补没答案的符号，不动我们写进去的那些）。
+          make defconfig </dev/null > "$TYFZA1_WORK/defconfig.log" 2>&1 || {
+            echo "::error::make defconfig 失败"; tail -40 "$TYFZA1_WORK/defconfig.log"; exit 1; }
+          grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config \
+            || { echo "::error::defconfig 把 BTF 丢了（片段没生效？）"; exit 1; }
+          echo "✅ defconfig 后 BTF 仍在（.config $(grep -c '^CONFIG_' .config) 条）"
           make tools/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-tools.log" 2>&1 || {
             echo "::error::tools/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-tools.log"; exit 1; }
           make target/linux/oldconfig </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {

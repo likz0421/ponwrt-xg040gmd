@@ -287,13 +287,21 @@ jobs:
           echo "=== honk 资产：下载校验 + 解包 + 安装路径必须存在（上次断在这）==="
           make package/custom/honk/download -j1 2>&1 | tail -3
           make package/custom/honk/prepare -j1 2>&1 | tail -3
-          DIST=$(sed -n 's|^HONK_DIST:=\$(PKG_BUILD_DIR)/\(.*\)$|\1|p' package/custom/honk/Makefile)
+          DIST=$(sed -n 's|^HONK_DIST:=\$(PKG_BUILD_DIR)\(.*\)$|\1|p' package/custom/honk/Makefile)
           HONK_FILE=$(sed -n 's|^HONK_FILE=\(.*\)$|\1|p' "$GITHUB_WORKSPACE/ctrl/honk-manifest.txt")
           [ -n "$HONK_FILE" ] || { echo "::error::honk-manifest.txt 里取不到 HONK_FILE"; exit 1; }
-          # 解包目录是 build_dir/target-*/honk-<版本>/<资产名>，在 build_dir 下第二层，
-          # 上一轮用 -maxdepth 1 找 'honk-*' 永远为空（自己把自己判死了）。
-          BD=$(find build_dir -type d -name "$DIST" -print -quit 2>/dev/null)
-          [ -n "$BD" ] && [ -n "$DIST" ] || { echo "::error::没找到解包目录（BD=[$BD] DIST=[$DIST]）"; find build_dir -maxdepth 2 -type d -name 'honk*' | head; exit 1; }
+          # 按 Makefile 里真正写的那个路径去要文件，不要"找一个刚好叫这名字的目录"：
+          # 上一轮就是被这句放过的 —— find 在别处找到了解包目录，recipe 用的却是
+          # 另一个路径，于是 install 报 cannot stat。这里把 $(BUILD_DIR) 展开成
+          # build_dir/target-*，再拼 Makefile 里写的 PKG_BUILD_DIR 后缀。
+          TB=$(find build_dir -maxdepth 1 -type d -name 'target-*' -print -quit)
+          [ -n "$TB" ] || { echo "::error::没有 build_dir/target-*"; exit 1; }
+          PBD=$(sed -n 's|^PKG_BUILD_DIR:=\$(BUILD_DIR)/\(.*\)$|\1|p' package/custom/honk/Makefile)
+          [ -n "$PBD" ] || { echo "::error::读不出 PKG_BUILD_DIR 的后缀"; exit 1; }
+          BD="$TB/$PBD"
+          { [ -z "$DIST" ] || [ "$DIST" = "/$PBD" ]; } || {
+            echo "::error::HONK_DIST 不是指向 PKG_BUILD_DIR 本身：DIST=[$DIST] PBD=[$PBD]"; exit 1; }
+          [ -d "$BD" ] || { echo "::error::解包目录不在 recipe 说的位置：$BD"; find build_dir -maxdepth 2 -type d -name 'honk*' | head; exit 1; }
           for f in "$BD/$HONK_FILE" "$BD/LICENSE" package/custom/honk/files/honk.init \
                    package/custom/honk/files/honk.config package/custom/honk/files/config.dae; do
             [ -s "$f" ] || { echo "::error::生成的 honk/Makefile 要装的文件不存在: $f"; exit 1; }

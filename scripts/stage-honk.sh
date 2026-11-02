@@ -85,12 +85,18 @@ PKG_HASH:=$HONK_SHA256
 
 PKG_LICENSE:=GPL-3.0-only
 PKG_LICENSE_FILES:=LICENSE
-PKG_BUILD_DIR:=\$(BUILD_DIR)/\$(PKG_NAME)-\$(PKG_VERSION)
+# include/unpack.mk: TAR_CMD=\$(HOST_TAR) -C \$(1)/.. \$(TAR_OPTIONS) —— 解包落在
+# PKG_BUILD_DIR 的**父目录**，也就是指望 tar 自己顶层那个目录名正好等于 PKG_BUILD_DIR
+# 的名字。官方资产的顶层是 honk-core-v<版本>-aarch64-unknown-linux-musl-full，
+# 上一轮把它写成 honk-<版本>，解出来的东西在别处，install 时
+# "cannot stat .../honk-0.1.0-beta.4/honk-core-v.../honk-core: No such file"。
+# 所以 PKG_BUILD_DIR 必须就叫 tar 里那个名字。
+PKG_BUILD_DIR:=\$(BUILD_DIR)/${HONK_ASSET%.tar.gz}
 
 include \$(INCLUDE_DIR)/package.mk
 
-# 资产里是一层同名子目录，解包后按实际位置取
-HONK_DIST:=\$(PKG_BUILD_DIR)/${HONK_ASSET%.tar.gz}
+# 载荷直接就在 PKG_BUILD_DIR 下（不再有一层同名子目录）
+HONK_DIST:=\$(PKG_BUILD_DIR)
 
 define Package/honk
   SECTION:=net
