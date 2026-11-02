@@ -202,7 +202,8 @@ jobs:
           readelf -S "$VML" | grep -E '\.BTF( |_])' || { echo "::error::vmlinux 没有 .BTF 段 → BTF 没生效"; exit 1; }
           echo "✅ .BTF 在 $VML"
           echo "=== 2) rootfs 的 apk 库里必须有我们加的包 ==="
-          ROOTFS=$(find sources/openwrt/build_dir -maxdepth 1 -type d -name 'root-rtl9617c*' | head -1)
+          # root-rtl9617c 在 build_dir/target-*/ 下面（深度 2）
+          ROOTFS=$(find sources/openwrt/build_dir -maxdepth 2 -type d -name 'root-rtl9617c*' | head -1)
           [ -n "$ROOTFS" ] || ROOTFS=$(find sources/openwrt/build_dir -maxdepth 2 -type d -name 'root-*' | head -1)
           DB="$ROOTFS/lib/apk/db/installed"
           [ -s "$DB" ] || { echo "::error::没有 apk 数据库 $DB，无法核对"; exit 1; }
