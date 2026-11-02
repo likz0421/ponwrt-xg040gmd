@@ -241,24 +241,43 @@ jobs:
           [ -n "$VML" ] || { echo "::error::找不到 vmlinux"; exit 1; }
           readelf -S "$VML" | grep -E '\.BTF( |_])' || { echo "::error::vmlinux 没有 .BTF 段 → BTF 没生效"; exit 1; }
           echo "✅ .BTF 在 $VML"
-          echo "=== 2) rootfs 的 apk 库里必须有我们加的包 ==="
-          # root-rtl9617c 在 build_dir/target-*/ 下面（深度 2）
-          ROOTFS=$(find sources/openwrt/build_dir -maxdepth 2 -type d -name 'root-rtl9617c*' | head -1)
-          [ -n "$ROOTFS" ] || ROOTFS=$(find sources/openwrt/build_dir -maxdepth 2 -type d -name 'root-*' | head -1)
-          DB="$ROOTFS/lib/apk/db/installed"
-          [ -s "$DB" ] || { echo "::error::没有 apk 数据库 $DB，无法核对"; exit 1; }
+          echo "=== 2) 所有 rootfs 的 apk 库并集里必须有我们加的包 ==="
+          # 与 XG 同一条经验：PER_DEVICE_ROOTFS=y 时机型专属包在 $(KDIR)/target-dir-<id>
+          # （include/image.mk:38 的 mkfs_target_dir），不在 root-<board> 里。
+          # 按目录名挑一份 rootfs 会把"镜像里有"误判成"没有"，所以找所有 apk 库求并集。
+          DBS=$(find sources/openwrt/build_dir -maxdepth 7 -type f -path '*/lib/apk/db/installed' | sort)
+          [ -n "$DBS" ] || { echo "::error::build_dir 里没有任何 apk installed 库"; exit 1; }
+          ROOTS=$(printf '%s\n' "$DBS" | sed 's|/lib/apk/db/installed$||')
+          for db in $DBS; do
+            printf '    %s  共 %s 包  honk=%s lucent=%s\n' "${db%/lib/apk/db/installed}" \
+              "$(grep -c '^P:' "$db")" "$(grep -cE '^P:honk$' "$db")" "$(grep -cE '^P:luci-theme-lucent$' "$db")"
+          done
           MISS=""
           for p in honk luci-app-honk luci-lib-daeuniverse luci-theme-lucent kmod-sched-core kmod-nft-queue kmod-nfnetlink-queue v2ray-geosite; do
-            grep -qE "^P:$p$" "$DB" || MISS="$MISS $p"
+            grep -qsE "^P:$p$" $DBS || MISS="$MISS $p"
           done
-          [ -z "$MISS" ] || { echo "::error::镜像里缺这些包:$MISS"; exit 1; }
-          echo "✅ 我们加的包都在镜像里（apk 库共 $(grep -c '^P:' "$DB") 条）"
-          echo "=== 3) 实体文件 ==="
-          for f in usr/bin/honk-core etc/init.d/honk usr/lib/luci-theme-lucent; do
-            [ -e "$ROOTFS/$f" ] || echo "· 注：$f 不在此路径（主题资源在 www/ 与 usr/share/luci 下）"
+          [ -z "$MISS" ] || { echo "::error::所有 rootfs 里都没有这些包:$MISS"; exit 1; }
+          echo "✅ 我们加的包都在镜像里（并集判据，$(printf '%s\n' "$ROOTS" | wc -l) 份 rootfs）"
+          echo "=== 3) 实体文件（同样按并集找）==="
+          MISSBIN=""
+          for f in usr/bin/honk-core etc/init.d/honk; do
+            hit=""
+            for r in $ROOTS; do [ -s "$r/$f" ] && { hit="$r/$f"; break; }; done
+            [ -n "$hit" ] || MISSBIN="$MISSBIN $f"
           done
-          [ -e "$ROOTFS/usr/bin/honk-core" ] || { echo "::error::rootfs 里没有 honk-core"; exit 1; }
-          du -h "$ROOTFS/usr/bin/honk-core"
+          [ -z "$MISSBIN" ] || { echo "::error::所有 rootfs 里都缺这些文件:$MISSBIN"; exit 1; }
+          BIN=""
+          for r in $ROOTS; do [ -s "$r/usr/bin/honk-core" ] && { BIN="$r/usr/bin/honk-core"; break; }; done
+          echo "✅ honk-core 在镜像里：$BIN ($(du -h "$BIN" | cut -f1))"
+          # 主题的静态资源路径由主题自己的 Makefile 决定，我们没核实过命名，
+          # 所以这里只给警告，不做硬断言（apk 库里已经有 luci-theme-lucent 这条是硬判据）。
+          THEMEDIR=""
+          for r in $ROOTS; do
+            d=$(find "$r/htdocs/luci-static" -maxdepth 1 -type d -name '*lucent*' 2>/dev/null | head -1 || true)
+            [ -n "$d" ] && { THEMEDIR="$d"; break; }
+          done
+          [ -n "$THEMEDIR" ] && echo "✅ 主题静态资源：$THEMEDIR" \
+            || echo "::warning::rootfs 里没按 *lucent* 命名找到主题资源，刷机后在 /www/htdocs/luci-static 下确认"
 
       - name: Package release artifacts
         run: |

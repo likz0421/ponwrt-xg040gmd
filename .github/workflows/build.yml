@@ -384,51 +384,58 @@ jobs:
           fi
           echo "核对 $MAN"
           # 包列表以 rootfs 的 apk 数据库为准：那才是"镜像里到底装了什么"的权威来源。
-          # manifest 有过两次误判：它是 SoC 级汇总（不含机型专属的 kmod-airoha-en7572），
-          # 且 C++ 运行时在包数据库里叫 libstdc++ 而不是符号名 libstdcpp。
-          # root-airoha 在 build_dir/target-*/ 下面（深度 2），-maxdepth 1 会找不到
-          ROOTFS=$(find build_dir -maxdepth 2 -type d -name 'root-airoha*' | head -1)
-          DB=""
-          [ -n "$ROOTFS" ] && [ -f "$ROOTFS/lib/apk/db/installed" ] && DB="$ROOTFS/lib/apk/db/installed"
-          [ -n "$DB" ] && echo "以 $DB 为准" || echo "::warning::没有 apk installed 库，退回用 manifest 文本判"
+          # 但 CONFIG_TARGET_PER_DEVICE_ROOTFS=y 时机型专属包不在 root-airoha 里：
+          # include/image.mk:38 的 mkfs_target_dir 用的是 $(KDIR)/target-dir-$(ROOTFS_ID)，
+          # 每个设备一份（kmod-airoha-en7572 正是 profile 的 device_packages，本轮
+          # profiles.json 两个 profile 都带着它）。上一轮只查 find -name 'root-*' | head -1
+          # 拿到的共享 rootfs，于是把"镜像里有"判成"没有"。
+          # 所以这里不按目录名猜，直接找所有 apk installed 库，谁在里面就认谁。
+          DBS=$(find build_dir -maxdepth 7 -type f -path '*/lib/apk/db/installed' | sort)
+          [ -n "$DBS" ] || { echo "::error::build_dir 里找不到任何 apk installed 库"; exit 1; }
+          # <root>/lib/apk/db/installed → 去掉尾巴四段才是 rootfs 目录
+          ROOTS=$(printf '%s\n' "$DBS" | sed 's|/lib/apk/db/installed$||')
+          echo "参与比对的 rootfs（$(printf '%s\n' "$ROOTS" | wc -l) 份）："
+          for db in $DBS; do
+            printf '    %s  共 %s 包  en7572=%s lucent=%s honk=%s\n' \
+              "${db%/lib/apk/db/installed}" "$(grep -c '^P:' "$db")" \
+              "$(grep -cE '^P:kmod-airoha-en7572$' "$db")" \
+              "$(grep -cE '^P:luci-theme-lucent$' "$db")" "$(grep -cE '^P:honk$' "$db")"
+          done
           MISS=""
           for p in kmod-airoha-xpon kmod-airoha-pon-frontend kmod-airoha-en7572 \
                    airoha-pond airoha-ponctl luci-app-pon luci-app-natmode \
                    luci-app-pon-status luci-theme-lucent kmod-nft-fullcone \
                    kmod-sched-core kmod-nft-queue kmod-nfnetlink-queue kmod-veth \
                    honk luci-app-honk luci-lib-daeuniverse v2ray-geosite; do
-            if [ -n "$DB" ]; then
-              grep -qE "^P:$p$" "$DB" || MISS="$MISS $p"
-            else
-              grep -qE "^${p} - " "$MAN" || MISS="$MISS $p"
-            fi
+            grep -qsE "^P:$p$" $DBS || MISS="$MISS $p"
           done
-          [ -z "$MISS" ] || { echo "::error::成品镜像缺这些包:$MISS"; exit 1; }
-          echo "✅ 成品包列表齐全（判据：${DB:-manifest}）"
-          [ -n "$ROOTFS" ] || { echo "::error::找不到装配中的 rootfs（build_dir/target-*/root-airoha*）"; exit 1; }
-          # honk 是解包进 rootfs 的（不是首启安装），直接查镜像装配目录里的实体文件
+          [ -z "$MISS" ] || { echo "::error::所有 rootfs 里都没有这些包:$MISS"; exit 1; }
+          echo "✅ 成品包列表齐全（判据：上述 $(printf '%s\n' "$ROOTS" | wc -l) 份 rootfs 的 apk 库，至少一处命中）"
+          # honk 是解包进 rootfs 的（不是首启安装）；apk 源和公钥来自 files/ 覆盖层。
+          # 两类都按"所有 rootfs 里至少一处有"来判，缺了就是设备上没有。
           MISSBIN=""
-          for f in usr/bin/honk-core etc/init.d/honk etc/config/honk etc/honk/config.dae; do
-            [ -s "$ROOTFS/$f" ] || MISSBIN="$MISSBIN $f"
-          done
-          [ -n "$MISSBIN" ] && { echo "::error::rootfs 里缺这些 honk 文件:$MISSBIN"; exit 1; }
-          echo "✅ honk 已在 rootfs：$ROOTFS/usr/bin/honk-core $(du -h "$ROOTFS/usr/bin/honk-core" | cut -f1)"
-          # LuCI 侧也要有，否则固件里没有配置界面
-          ls "$ROOTFS"/usr/share/luci/menu.d/*honk* >/dev/null 2>&1 \
-            || echo "::warning::rootfs 里没找到 honk 的 LuCI menu.d 条目（界面可能进不去，检查 luci-app-honk 载荷）"
-          # files/ 覆盖层里的 apk 源与公钥也必须真的落进镜像：
-          # 少了它们，设备上的 apk update 只会对着不存在的源报错（构建却是绿的）。
-          MISSREPO=""
-          for f in etc/apk/repositories.d/ponwrt.list etc/apk/repositories.d/daeuniverse.list \
+          for f in usr/bin/honk-core etc/init.d/honk etc/config/honk etc/honk/config.dae \
+                   etc/apk/repositories.d/ponwrt.list etc/apk/repositories.d/daeuniverse.list \
                    etc/apk/keys/daeuniverse.pem etc/apk/repositories.d/distfeeds.list; do
-            [ -s "$ROOTFS/$f" ] || MISSREPO="$MISSREPO $f"
+            hit=""
+            for r in $ROOTS; do [ -s "$r/$f" ] && { hit="$r/$f"; break; }; done
+            [ -n "$hit" ] || MISSBIN="$MISSBIN $f"
           done
-          if [ -n "$MISSREPO" ]; then
-            echo "::error::rootfs 里缺这些 apk 源文件:$MISSREPO"
-            ls -l "$ROOTFS/etc/apk/repositories.d" "$ROOTFS/etc/apk/keys" 2>&1 | sed 's/^/  /'
+          if [ -n "$MISSBIN" ]; then
+            echo "::error::所有 rootfs 里都缺这些文件:$MISSBIN"
+            for r in $ROOTS; do echo "    $r"; ls -l "$r/etc/apk/repositories.d" "$r/etc/apk/keys" 2>&1 | sed 's/^/      /'; done
             exit 1
           fi
-          echo "✅ 设备侧 apk 源与公钥已进镜像：$(grep -hE '^@' "$ROOTFS"/etc/apk/repositories.d/*.list | wc -l) 条源"
+          BIN=""
+          for r in $ROOTS; do [ -s "$r/usr/bin/honk-core" ] && { BIN="$r/usr/bin/honk-core"; break; }; done
+          echo "✅ honk 实体在镜像里：$BIN ($(du -h "$BIN" | cut -f1))"
+          # LuCI 侧也要有，否则固件里没有配置界面
+          LUCI_OK=""
+          for r in $ROOTS; do ls "$r"/usr/share/luci/menu.d/*honk* >/dev/null 2>&1 && { LUCI_OK=1; break; }; done
+          [ -n "$LUCI_OK" ] || echo "::warning::rootfs 里没找到 honk 的 LuCI menu.d 条目（界面可能进不去，检查 luci-app-honk 载荷）"
+          RP=""
+          for r in $ROOTS; do [ -s "$r/etc/apk/repositories.d/ponwrt.list" ] && { RP="$r"; break; }; done
+          echo "✅ 设备侧 apk 源与公钥已进镜像（$RP）：$(cat "$RP"/etc/apk/repositories.d/*.list | grep -cE '^@') 条源，$(ls "$RP"/etc/apk/keys | wc -l) 把钥匙"
           # 内核自带 BTF，不该出现 blob 版 vmlinux-btf
           if grep -qE '^vmlinux-btf - ' "$MAN"; then
             echo "::error::成品里装了 blob 版 vmlinux-btf（我们该用 vmlinux-btf-builtin）"; exit 1
