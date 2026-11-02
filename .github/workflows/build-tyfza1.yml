@@ -162,65 +162,66 @@ jobs:
           # 上一轮的现象就是这么来的：DEBUG_INFO 还在（种子里本来就有）、BTF 没了、种子一行没改。
           # 我们要的是 kernel-defaults.mk:117-119 那份「种子 + 我们的覆盖」合成后的 .config，
           # 所以先真跑一次 configure（它会在 .modules 的 syncconfig 上按预期失败），
-          # 再在那份 .config 上补答，最后用 kconfig.pl '>' 把差量写回种子。
-          echo "=== 1) 先跑一次内核编译（预期在 syncconfig 处失败，但 .config 已带上我们的覆盖）==="
-          make target/compile -j1 > "$TYFZA1_WORK/kernel-first.log" 2>&1 || true
-          KD=$(find build_dir -maxdepth 4 -type d -name 'linux-6.18*' -path '*rtl9617c*' | head -1)
-          [ -n "$KD" ] || { echo "::error::没有 rtl9617c 的内核构建目录"; tail -50 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
-          [ -s "$KD/.config" ] || { echo "::error::$KD/.config 没生成（configure 没跑到）"; tail -60 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
-          grep -q '^CONFIG_DEBUG_INFO=y' "$KD/.config" \
-            || { echo "::error::内核 .config 里没有我们的 DEBUG_INFO 覆盖"; tail -60 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
-          echo "=== OpenWrt 自己合并出来的内核配置（动它之前先拍照）==="
-          grep -nE '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF|BPF_SYSCALL|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|PAHOLE_VERSION)(=| )|^# CONFIG_(DEBUG_INFO_REDUCED|DEBUG_INFO_BTF) is not set' "$KD/.config" | head -14
-          # 这一步才是真判据：合并完就该有 BTF；没有说明问题在我们的覆盖/依赖，不是补答的问题
-          grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KD/.config" \
-            || { echo "::error::OpenWrt 合并后的内核 .config 里没有 BTF（我们的 CONFIG_KERNEL_DEBUG_INFO_BTF 没进内核配置）"; exit 1; }
-          echo "✅ 内核 .config 已含覆盖（含 BTF）：$KD/.config"
-          echo "=== 2) 在这份带覆盖的 .config 上把 (NEW) 符号按默认值答完 ==="
-          # 必须是 olddefconfig：oldconfig 会逐个提问 NEW 符号，喂 </dev/null 时 kconfig
-          # 直接 "Error in reading or end of file." 中途退出（上一轮就这样）。
-          # PATH 里必须带上 staging_dir/host/bin —— 6.18 的
-          # lib/Kconfig.debug:382 是 `depends on PAHOLE_VERSION >= 116`，没有
-          # "量不到就放行" 的退路：pahole 不在 PATH 时 PAHOLE_VERSION=0，
-          # kconfig 会把 DEBUG_INFO_BTF 当不可见符号**静默丢掉**。OpenWrt 自己编内核
-          # 时 pahole 是现成的（tools/dwarves 由 CONFIG_DWARVES 选中并编进 staging_dir），
-          # 所以我们手工调 kconfig 时必须复现同一个环境，否则是在给自己造一个假失败。
+          # 循环：编一次 → 若失败是 kconfig 提 (NEW)，就把**这些被提问的符号**的答案写回种子 → 再编。
+          # 上一轮的错误做法：用 kconfig.pl '>' 求「种子 vs 完整 .config」的全量差集写回 ——
+          # 种子只有 652 行、完整 .config 六千行，差集 2887 行全是"种子本来就不必写的默认项"，
+          # 那不是补答，是污染种子；第二次编译几秒就红了。
+          echo "=== 1..n) 编译尝试 → 只补 (NEW) 提问过的符号 → 再试（最多 4 轮）==="
           HOSTBIN="$PWD/staging_dir/host/bin"
-          [ -x "$HOSTBIN/pahole" ] || { echo "::error::$HOSTBIN/pahole 不存在（tools/dwarves 没编出来？）"; ls "$HOSTBIN" | grep -i pahole || true; exit 1; }
-          "$HOSTBIN/pahole" --version | head -1
-          ( cd "$KD" && PATH="$HOSTBIN:$PATH" make ARCH=arm64 olddefconfig < /dev/null ) > "$TYFZA1_WORK/koldconfig.log" 2>&1 || {
-            echo "::error::内核 olddefconfig 失败"; tail -60 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
-          grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KD/.config" || {
-            echo "::error::补答后 BTF 反被丢掉（它的某条依赖在这个内核里不成立）"
-            grep -nE 'CONFIG_DEBUG_INFO|CONFIG_BPF_SYSCALL|CONFIG_FTRACE|CONFIG_PAHOLE' "$KD/.config" | head -16
-            tail -30 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
-          echo "✅ BTF / DEBUG_INFO 已在内核 .config 里答上（olddefconfig 后仍在）"
-          echo "=== 3) 把相对种子新增的答案写回种子（只动 CI 工作树）==="
-          SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
-          [ -n "$SEED" ] || { echo "::error::找不到 rtl9617c 的内核种子配置"; exit 1; }
-          # '>' = config_diff（在右边、与左边不同项），和 LINUX_RECONF_DIFF 同一条语义。
-          # CONFIG_PAHOLE_VERSION 是 kconfig 每次用 $(shell pahole --version) 现算的派生值，
-          # 写进种子只是噪音（还可能把版本钉死），过滤掉。分两步写：
-          # `kconfig.pl | grep -v` 在 pipefail 下会因为 grep 没匹配（返回 1）而假报错。
-          scripts/kconfig.pl '>' "$SEED" "$KD/.config" > "$TYFZA1_WORK/seed-add.raw" 2> "$TYFZA1_WORK/kconfig.warn" || {
-            echo "::error::kconfig.pl 求差失败"; cat "$TYFZA1_WORK/kconfig.warn"; exit 1; }
-          grep -v '^CONFIG_PAHOLE_VERSION=' "$TYFZA1_WORK/seed-add.raw" > "$TYFZA1_WORK/seed-add.conf" || true
-          ADD=$(grep -c . "$TYFZA1_WORK/seed-add.conf" || true)
-          echo "写回 $SEED：新增/变更 $ADD 行"
-          sed -n '1,15p' "$TYFZA1_WORK/seed-add.conf" | sed 's/^/    /'
-          if [ "${ADD:-0}" -gt 0 ]; then
-            printf '\n# ponwrt：BTF/FTRACE 解锁出来的内核符号（oldconfig 默认答案，仅本工作树）\n' >> "$SEED"
-            cat "$TYFZA1_WORK/seed-add.conf" >> "$SEED"
-          fi
-          git diff --stat -- target/linux/rtl9617c || true
-          echo "=== 4) 复核：种子变了会重跑 configure，这次必须过（顺便把内核编完，不白跑）==="
-          make target/compile -j"$(nproc)" > "$TYFZA1_WORK/kernel-second.log" 2>&1 || {
-            echo "::error::补答后内核仍编不过（真错误如下）"
-            grep -nE '\*\*\*|[Ee]rror:|No rule|NEW\)' "$TYFZA1_WORK/kernel-second.log" | head -20 || true
-            echo "----- 出错点前后 80 行 -----"
-            LN=$(grep -nE 'ERROR: |Error [0-9]' "$TYFZA1_WORK/kernel-second.log" | tail -1 | cut -d: -f1 || true)
-            if [ -n "${LN:-}" ]; then sed -n "$((LN>80 ? LN-80 : 1)),$((LN+15))p" "$TYFZA1_WORK/kernel-second.log"; else tail -120 "$TYFZA1_WORK/kernel-second.log"; fi
-            exit 1; }
+          [ -x "$HOSTBIN/pahole" ] || { echo "::error::$HOSTBIN/pahole 不存在（tools/dwarves 应由 CONFIG_DWARVES 编出）"; ls "$HOSTBIN" | grep -i pahole || true; exit 1; }
+          echo "pahole：$("$HOSTBIN/pahole" --version | head -1)"
+          SEED=""; BUILT=""; TRIES=0
+          for i in 1 2 3 4; do
+            log="$TYFZA1_WORK/kernel-try-$i.log"
+            if make target/compile -j"$(nproc)" > "$log" 2>&1; then
+              BUILT=1; echo "✅ 第 $i 次尝试：内核编过了"; break
+            fi
+            KD=$(find build_dir -maxdepth 4 -type d -name 'linux-6.18*' -path '*rtl9617c*' | head -1)
+            [ -n "$KD" ] || { echo "::error::第 $i 次尝试后没有 rtl9617c 的内核构建目录"; tail -40 "$log"; exit 1; }
+            [ -s "$KD/.config" ] || { echo "::error::第 $i 次：内核 .config 没生成（configure 没跑到）"; tail -40 "$log"; exit 1; }
+            [ -n "$SEED" ] || SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
+            [ -n "$SEED" ] || { echo "::error::找不到 rtl9617c 的内核种子配置"; exit 1; }
+            NEW=$(grep -oE '\(([A-Z][A-Z0-9_]*)\) \[[^]]*\] \(NEW\)' "$log" | sed -E 's/\) \[.*//; s/^\(//' | sort -u || true)
+            if [ -z "$NEW" ]; then
+              echo "::error::第 $i 次失败，但不是 kconfig 提问导致的 —— 真错误如下"
+              grep -nE '\*\*\*|[Ee]rror:|No rule|cannot|undefined reference' "$log" | head -20 || true
+              LN=$(grep -nE 'ERROR: |Error [0-9]' "$log" | tail -1 | cut -d: -f1 || true)
+              if [ -n "${LN:-}" ]; then sed -n "$((LN>80 ? LN-80 : 1)),$((LN+15))p" "$log"; else tail -100 "$log"; fi
+              echo "----- 再用 -j1 V=s 单跑一次拿完整上下文 -----"
+              make target/compile -j1 V=s 2>&1 | tail -80 || true
+              exit 1
+            fi
+            echo "第 $i 轮：kconfig 提问 $(printf '%s\n' "$NEW" | wc -l) 个符号：$(printf '%s ' $NEW)"
+            # olddefconfig，不是 oldconfig：后者逐个提问，喂 </dev/null 会中途报错退出。
+            # PATH 必须带 staging_dir/host/bin：6.18 lib/Kconfig.debug:382 是
+            # `depends on PAHOLE_VERSION >= 116`，量不到 pahole 时 PAHOLE_VERSION=0，
+            # kconfig 会把 DEBUG_INFO_BTF 当不可见符号静默丢掉。
+            ( cd "$KD" && PATH="$HOSTBIN:$PATH" make ARCH=arm64 olddefconfig < /dev/null ) > "$TYFZA1_WORK/koldconfig-$i.log" 2>&1 || {
+              echo "::error::olddefconfig 失败"; tail -40 "$TYFZA1_WORK/koldconfig-$i.log"; exit 1; }
+            grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$KD/.config" || {
+              echo "::error::olddefconfig 之后 BTF 不见了（依赖不成立或被覆盖丢掉）"
+              grep -nE 'CONFIG_DEBUG_INFO|CONFIG_BPF_SYSCALL|CONFIG_PAHOLE' "$KD/.config" | head -14
+              tail -30 "$TYFZA1_WORK/koldconfig-$i.log"; exit 1; }
+            : > "$TYFZA1_WORK/seed-add.conf"
+            for s in $NEW; do
+              line=""
+              v=$(grep -m1 -oE "^CONFIG_$s=.*" "$KD/.config" || true)
+              if [ -n "$v" ]; then line="$v"
+              elif grep -qxF "# CONFIG_$s is not set" "$KD/.config"; then line="# CONFIG_$s is not set"
+              else echo "· 注：$s 在内核 .config 里没有可见答案（多半是无形式的派生符号）"; continue; fi
+              grep -qxF "$line" "$SEED" && continue
+              printf '%s\n' "$line" >> "$TYFZA1_WORK/seed-add.conf"
+            done
+            ADD=$(grep -c . "$TYFZA1_WORK/seed-add.conf" || true)
+            if [ "${ADD:-0}" -gt 0 ]; then
+              printf '\n# ponwrt：kconfig 提问过的符号，按默认值补答（仅本工作树，不改上游）\n' >> "$SEED"
+              cat "$TYFZA1_WORK/seed-add.conf" >> "$SEED"
+            fi
+            TRIES=$i
+            echo "  → 写回 $SEED：本轮 $ADD 行，种子现有 $(grep -c '^CONFIG_\|^# CONFIG_' "$SEED") 行"
+            git diff --stat -- target/linux/rtl9617c || true
+          done
+          [ -n "$BUILT" ] || { echo "::error::$TRIES 轮补答后内核仍编不过"; tail -60 "$TYFZA1_WORK/kernel-try-4.log"; exit 1; }
           KC=$(find build_dir -maxdepth 5 -type f -name .config -path '*linux-rtl9617c*' | head -1)
           grep -E '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|BPF_EVENTS)=y|^# CONFIG_DEBUG_INFO_REDUCED is not set' "$KC"
           grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KC" || { echo "::error::重编后 BTF 又丢了（被 override 覆盖？$KC）"; exit 1; }
