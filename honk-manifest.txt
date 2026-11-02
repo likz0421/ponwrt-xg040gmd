@@ -14,6 +14,12 @@
 # 结果：honk 是固件里的正常包，进 apk 数据库、可 apk upgrade、依赖齐全。
 
 HONK_VERSION=0.1.0-beta.4
+# apk 的版本号里 `-` 是 revision 分隔符，整个字符串只允许出现一次：
+# 0.1.0-beta.4-r1 会被 `apk mkpkg` 直接拒掉（"package version is invalid"，上一轮就是这）。
+# 写成下划线形式，并且和 daeuniverse 自己 Makefile 里的 PKG_VERSION 一字不差
+# （`PKG_VERSION:=$(if $(HONK_VERSION),$(HONK_VERSION),0.1.0_beta4)`），
+# 这样将来从 @daeuniverse 装同名包时，版本比较不会因为我们这边排得更高而拒绝"降级"。
+HONK_PKG_VERSION=0.1.0_beta4
 HONK_ASSET=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
 HONK_URL=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.4/honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
 # 与 release 附带的 SHA256SUMS 逐字核对过（不是只信我自己下载后算的那次）

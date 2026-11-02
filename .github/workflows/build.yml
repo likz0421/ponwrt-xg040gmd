@@ -307,15 +307,19 @@ jobs:
             [ -s "$f" ] || { echo "::error::生成的 honk/Makefile 要装的文件不存在: $f"; exit 1; }
           done
           echo "✅ honk 安装源齐备（$BD/$HONK_FILE $(du -h "$BD/$HONK_FILE" | cut -f1)）"
+          # 一次把所有自加包都试完再报，不要见到第一个就 exit：
+          # 上一轮 exit 在 honk，LuCI 侧和主题到底行不行完全不知道，等于把一轮的信息压成一行。
+          FAIL=""
           for p in honk luci-app-honk luci-lib-daeuniverse luci-app-natmode luci-app-pon-status luci-theme-lucent; do
             if make "package/custom/$p/compile" -j1 >/dev/null 2>&1; then
               echo "✅ $p 编过"
             else
               echo "=== $p 失败，重跑 V=s 看真实原因 ==="
               make "package/custom/$p/compile" -j1 V=s 2>&1 | tail -40
-              exit 1
+              FAIL="$FAIL $p"
             fi
           done
+          [ -z "$FAIL" ] || { echo "::error::这些自加包没编过:$FAIL"; exit 1; }
           echo "--- 产物 ---"
           # 实测归属（上一轮的错误日志给的答案）：非 feed 的 package/custom 在
           # bin/packages/aarch64_cortex-a53/base/honk-<版本>-r1.apk，target 目录里主要是

@@ -19,10 +19,11 @@ val() {   # 取 key=value，剥掉行内注释与首尾空白
 	}' "$M" | tail -1
 }
 HONK_VERSION="$(val HONK_VERSION)"; HONK_ASSET="$(val HONK_ASSET)"
+HONK_PKG_VERSION="$(val HONK_PKG_VERSION)"
 HONK_URL="$(val HONK_URL)";        HONK_SHA256="$(val HONK_SHA256)"
 HONK_FILE="$(val HONK_FILE)"
 DAEUNIV_URL="$(val DAEUNIV_URL)";  DAEUNIV_SHA="$(val DAEUNIV_SHA)"
-for v in HONK_VERSION HONK_ASSET HONK_URL HONK_SHA256 HONK_FILE DAEUNIV_URL DAEUNIV_SHA; do
+for v in HONK_VERSION HONK_PKG_VERSION HONK_ASSET HONK_URL HONK_SHA256 HONK_FILE DAEUNIV_URL DAEUNIV_SHA; do
 	[ -n "${!v}" ] || { echo "::error::honk-manifest.txt 缺 $v"; exit 1; }
 done
 # 值必须是干净 token：带空格/# 的取值会拼进 Makefile recipe，install 会吃掉目标路径
@@ -30,8 +31,14 @@ case "$HONK_FILE" in *[!A-Za-z0-9._-]*) echo "::error::HONK_FILE 含非法字符
 case "$HONK_ASSET" in *[!A-Za-z0-9._+-]*) echo "::error::HONK_ASSET 含非法字符: [$HONK_ASSET]"; exit 1;; esac
 case "$HONK_SHA256" in *[!0-9a-f]*) echo "::error::HONK_SHA256 不是十六进制: [$HONK_SHA256]"; exit 1;; esac
 [ "${#HONK_SHA256}" = 64 ] || { echo "::error::HONK_SHA256 长度 ${#HONK_SHA256} ≠ 64"; exit 1; }
+# apk 版本号：`-` 只许一次（是 revision 分隔符），所以这里根本不能再出现；
+# 上一轮 `0.1.0-beta.4-r1` 被 apk mkpkg 判 "package version is invalid" 就是踩这条。
+case "$HONK_PKG_VERSION" in *-*) echo "::error::HONK_PKG_VERSION 里不能有 -（apk 拿它当 revision 分隔符）: [$HONK_PKG_VERSION]"; exit 1;; esac
+case "$HONK_PKG_VERSION" in *[!0-9A-Za-z._~+]*) echo "::error::HONK_PKG_VERSION 含 apk 不接受的字符: [$HONK_PKG_VERSION]"; exit 1;; esac
+case "$HONK_PKG_VERSION" in [0-9]*) ;; *) echo "::error::HONK_PKG_VERSION 要以数字开头: [$HONK_PKG_VERSION]"; exit 1;; esac
 echo "honk $HONK_VERSION  资产 $HONK_ASSET"
 echo "     sha256 $HONK_SHA256（与 release 的 SHA256SUMS 逐字核对过）"
+echo "     包版本号用 $HONK_PKG_VERSION（apk 合法形态，与 daeuniverse 自己的一致）"
 echo "feed  $DAEUNIV_URL @ ${DAEUNIV_SHA:0:7}"
 
 cd "$ROOT"
@@ -76,7 +83,8 @@ cat > "$HB/Makefile" <<MK
 include \$(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
-PKG_VERSION:=$HONK_VERSION
+# 用 apk 合法形态的版本号（manifest 里 HONK_PKG_VERSION），下载名仍用资产原名
+PKG_VERSION:=$HONK_PKG_VERSION
 PKG_RELEASE:=1
 
 PKG_SOURCE:=$HONK_ASSET
@@ -139,7 +147,7 @@ endef
 \$(eval \$(call BuildPackage,honk))
 MK
 grep -q 'call BuildPackage' "$HB/Makefile" || { echo "::error::生成的 honk/Makefile 缺扫描标记"; exit 1; }
-echo "✅ 已生成 $HB/Makefile（PKG_VERSION=$HONK_VERSION）"
+echo "✅ 已生成 $HB/Makefile（上游 release $HONK_VERSION → 包版本 $HONK_PKG_VERSION）"
 
 # ---- 3. 重建索引并断言三个包 + 关键依赖存在 ----
 rm -f tmp/.packageinfo tmp/.targetinfo
