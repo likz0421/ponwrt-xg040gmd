@@ -112,18 +112,18 @@ jobs:
             "$GITHUB_WORKSPACE/ctrl" "$TYFZA1_WORK/artifacts/custom.config"
 
       - name: Answer kernel symbols unmasked by BTF/FTRACE
-        # 上一轮真错误：内核 syncconfig 走到
+        # 现象：内核 syncconfig 停在
         #   TYFZA1 USB presence and activity LED (LEDS_TRIGGER_TYFZA1_USB) [N/m/?] (NEW)
         #   scripts/kconfig/Makefile:85: syncconfig Error 1
-        # 我们把 DEBUG_INFO/BTF/FTRACE 打开后，被"解锁"出来的新符号在 rtl9617c 的
-        # 内核种子配置里没有答案；而 OpenWrt 编内核时带 FAIL_ON_UNCONFIGURED=1
-        # （include/kernel-build.mk:178），syncconfig 见 NEW 就报错，不会自己取默认值。
-        # 官方入口是 `make kernel_oldconfig`（include/toplevel.mk:193，它自己去
-        # `-C target/linux oldconfig` 并先备好 quilt）。**不是** `target/linux/oldconfig`：
-        # 顶层只有 `%::` 兜底规则，会把那个字符串原样交给 SUBMAKE -r，于是
-        # "No rule to make target 'target/linux/oldconfig'"（上一轮就是这么死的，
-        # 而且内核压根还没解包）。
-        # 只改 CI 工作树里那份种子，上游仓库一个字不动。
+        # 我们打开 DEBUG_INFO/BTF/FTRACE 后，被"解锁"出来的符号在 rtl9617c 的内核种子里
+        # 没有答案；OpenWrt 编内核带 FAIL_ON_UNCONFIGURED=1（include/kernel-build.mk），
+        # syncconfig 见 NEW 直接报错，不会自己取默认值。
+        # 试过 make kernel_oldconfig（入口名在 include/toplevel.mk:193，不是
+        # target/linux/oldconfig —— 顶层只有 %:: 兜底，那个字符串会 "No rule to make target"），
+        # 但它从**种子**重建 .config（include/target.mk:212），会把我们的 CONFIG_KERNEL_*
+        # 覆盖丢掉：结果是 DEBUG_INFO 在、BTF 没了、种子一行没变 —— 白过。
+        # 所以这里改成：先让 OpenWrt 自己做一次「种子 + 覆盖」的 configure，在那份 .config
+        # 上补答，再用 kconfig.pl '>' 把差量写回种子。只动 CI 工作树，上游仓库一个字不改。
         run: |
           set -euo pipefail
           cd "$TYFZA1_WORK"
@@ -157,30 +157,55 @@ jobs:
           echo "✅ defconfig 后 BTF 仍在、机型为 rtl9617c（.config $(grep -c '^CONFIG_' .config) 条）"
           make tools/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-tools.log" 2>&1 || {
             echo "::error::tools/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-tools.log"; exit 1; }
-          make kernel_oldconfig -j1 V=s </dev/null > "$TYFZA1_WORK/oldconfig.log" 2>&1 || {
-            echo "::error::make kernel_oldconfig 失败（V=s 全量日志如下）"
-            echo "----- 日志 $(wc -l < "$TYFZA1_WORK/oldconfig.log") 行；先给错误行 -----"
-            grep -nE '\*\*\*|[Ee]rror|No rule|not found|cannot|Permission' \
-              "$TYFZA1_WORK/oldconfig.log" | head -25 || true
-            echo "----- 全量（末尾 200 行）-----"
-            tail -200 "$TYFZA1_WORK/oldconfig.log"
-            echo "----- 现场 -----"
-            ls -l dl/ 2>/dev/null | grep -iE 'linux|6\.18' | head -5 || echo "dl/ 里没有内核包"
-            ls staging_dir/host/bin 2>/dev/null | grep -E '^(bison|flex|perl|quilt|patch)' | tr '\n' ' ' || echo "（host bin 里没有 kconfig 要用的工具）"; echo
-            ls -d build_dir/*/linux-* 2>/dev/null || echo "（内核还没解包/打补丁）"
-            exit 1; }
-          echo "=== 种子配置因此新增的行（只在工作树里，只看我们这台）==="
+          # 不能用 kernel_oldconfig：它第一步是 LINUX_RECONF_CMD，从**种子**重建
+          # $(LINUX_DIR)/.config（include/target.mk:212），把我们 CONFIG_KERNEL_* 的覆盖丢掉。
+          # 上一轮的现象就是这么来的：DEBUG_INFO 还在（种子里本来就有）、BTF 没了、种子一行没改。
+          # 我们要的是 kernel-defaults.mk:117-119 那份「种子 + 我们的覆盖」合成后的 .config，
+          # 所以先真跑一次 configure（它会在 .modules 的 syncconfig 上按预期失败），
+          # 再在那份 .config 上补答，最后用 kconfig.pl '>' 把差量写回种子。
+          echo "=== 1) 先跑一次内核编译（预期在 syncconfig 处失败，但 .config 已带上我们的覆盖）==="
+          make target/compile -j1 > "$TYFZA1_WORK/kernel-first.log" 2>&1 || true
+          KD=$(find build_dir -maxdepth 4 -type d -name 'linux-6.18*' -path '*rtl9617c*' | head -1)
+          [ -n "$KD" ] || { echo "::error::没有 rtl9617c 的内核构建目录"; tail -50 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
+          [ -s "$KD/.config" ] || { echo "::error::$KD/.config 没生成（configure 没跑到）"; tail -60 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
+          grep -q '^CONFIG_DEBUG_INFO=y' "$KD/.config" \
+            || { echo "::error::内核 .config 里没有我们的 DEBUG_INFO 覆盖"; tail -60 "$TYFZA1_WORK/kernel-first.log"; exit 1; }
+          echo "✅ 内核 .config 已含覆盖：$KD/.config"
+          echo "=== 2) 在这份带覆盖的 .config 上按默认值补答 (NEW) 符号 ==="
+          # 用 </dev/null 而不是 `yes '' | make`：pipefail 会让 yes 的 SIGPIPE 变成假失败
+          ( cd "$KD" && make ARCH=arm64 oldconfig < /dev/null ) > "$TYFZA1_WORK/koldconfig.log" 2>&1 || {
+            echo "::error::内核 oldconfig 失败"; tail -60 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
+          grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KD/.config" || {
+            echo "::error::补答后 BTF 仍未启用（依赖没满足？）"
+            grep -nE 'CONFIG_DEBUG_INFO|CONFIG_FTRACE|CONFIG_PAHOLE' "$KD/.config" | head -12
+            tail -30 "$TYFZA1_WORK/koldconfig.log"; exit 1; }
+          echo "✅ BTF / DEBUG_INFO 已在内核 .config 里答上"
+          echo "=== 3) 把相对种子新增的答案写回种子（只动 CI 工作树）==="
+          SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
+          [ -n "$SEED" ] || { echo "::error::找不到 rtl9617c 的内核种子配置"; exit 1; }
+          # '>' = config_diff（在右边、与左边不同项），和 LINUX_RECONF_DIFF 同一条语义
+          scripts/kconfig.pl '>' "$SEED" "$KD/.config" > "$TYFZA1_WORK/seed-add.conf" 2> "$TYFZA1_WORK/kconfig.warn" || {
+            echo "::error::kconfig.pl 求差失败"; cat "$TYFZA1_WORK/kconfig.warn"; exit 1; }
+          ADD=$(grep -c . "$TYFZA1_WORK/seed-add.conf" || true)
+          echo "写回 $SEED：新增/变更 $ADD 行"
+          sed -n '1,15p' "$TYFZA1_WORK/seed-add.conf" | sed 's/^/    /'
+          if [ "${ADD:-0}" -gt 0 ]; then
+            printf '\n# ponwrt：BTF/FTRACE 解锁出来的内核符号（oldconfig 默认答案，仅本工作树）\n' >> "$SEED"
+            cat "$TYFZA1_WORK/seed-add.conf" >> "$SEED"
+          fi
           git diff --stat -- target/linux/rtl9617c || true
-          git diff -- target/linux/rtl9617c | grep -E '^\+[^+]' | head -25 || true
-          # 权威判据用 oldconfig 生成出来的那份内核 .config，并且按机型路径找 ——
-          # 上一轮就是被一个不限机型的 find 骗到（*linux-6.18* 先命中了 mediatek）。
+          echo "=== 4) 复核：种子变了会重跑 configure，这次必须过（顺便把内核编完，不白跑）==="
+          make target/compile -j"$(nproc)" > "$TYFZA1_WORK/kernel-second.log" 2>&1 || {
+            echo "::error::补答后内核仍编不过（真错误如下）"
+            grep -nE '\*\*\*|[Ee]rror:|No rule|NEW\)' "$TYFZA1_WORK/kernel-second.log" | head -20 || true
+            echo "----- 出错点前后 80 行 -----"
+            LN=$(grep -nE 'ERROR: |Error [0-9]' "$TYFZA1_WORK/kernel-second.log" | tail -1 | cut -d: -f1 || true)
+            if [ -n "${LN:-}" ]; then sed -n "$((LN>80 ? LN-80 : 1)),$((LN+15))p" "$TYFZA1_WORK/kernel-second.log"; else tail -120 "$TYFZA1_WORK/kernel-second.log"; fi
+            exit 1; }
           KC=$(find build_dir -maxdepth 5 -type f -name .config -path '*linux-rtl9617c*' | head -1)
-          [ -n "$KC" ] || { echo "::error::找不到 rtl9617c 的内核 .config"; ls -d build_dir/*/linux-* 2>/dev/null; exit 1; }
-          echo "=== $KC 里的关键答案 ==="
           grep -E '^CONFIG_(DEBUG_INFO|DEBUG_INFO_BTF|FTRACE|FUNCTION_TRACER|DYNAMIC_FTRACE|BPF_EVENTS)=y|^# CONFIG_DEBUG_INFO_REDUCED is not set' "$KC"
-          grep -q '^CONFIG_DEBUG_INFO=y' "$KC" || { echo "::error::内核 DEBUG_INFO 没被回答，BTF 不会生效"; exit 1; }
-          grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KC" || { echo "::error::内核 BTF 没被回答，honk 起不来"; exit 1; }
-          echo "✅ 内核符号已全部有答案（下一步不会再卡在 syncconfig）"
+          grep -q '^CONFIG_DEBUG_INFO_BTF=y' "$KC" || { echo "::error::重编后 BTF 又丢了（被 override 覆盖？$KC）"; exit 1; }
+          echo "✅ 内核带着 BTF 编过了，build.sh 那步不会卡在 syncconfig"
 
       - name: Build OpenWrt and native PE
         run: |
