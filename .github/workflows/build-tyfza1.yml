@@ -157,6 +157,16 @@ jobs:
           echo "✅ defconfig 后 BTF 仍在、机型为 rtl9617c（.config $(grep -c '^CONFIG_' .config) 条）"
           make tools/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-tools.log" 2>&1 || {
             echo "::error::tools/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-tools.log"; exit 1; }
+          # 还必须有 toolchain：内核 scripts/Kconfig.include:40 会真的去跑 $(CC) 探选项，
+          # 上一轮这里报
+          #   make[5]: aarch64-openwrt-linux-musl-gcc: No such file or directory
+          #   scripts/Kconfig.include:40: C compiler 'aarch64-openwrt-linux-musl-gcc' not found
+          # 于是 syncconfig 在"提问"之前就死了 —— 日志里根本没有 (NEW) 行，
+          # 我那套按 (NEW) 补答案的循环当然一轮也命不中。build.sh 迟早要做这一步，
+          # 提前做不重复花时间（同一套 stamp）。
+          make toolchain/install -j"$(nproc)" > "$TYFZA1_WORK/oldconfig-toolchain.log" 2>&1 || {
+            echo "::error::toolchain/install 失败"; tail -40 "$TYFZA1_WORK/oldconfig-toolchain.log"; exit 1; }
+          echo "✅ tools + toolchain 就位（内核 kconfig 要用交叉编译器探选项）"
           # 不能用 kernel_oldconfig：它第一步是 LINUX_RECONF_CMD，从**种子**重建
           # $(LINUX_DIR)/.config（include/target.mk:212），把我们 CONFIG_KERNEL_* 的覆盖丢掉。
           # 上一轮的现象就是这么来的：DEBUG_INFO 还在（种子里本来就有）、BTF 没了、种子一行没改。
@@ -184,6 +194,9 @@ jobs:
             NEW=$(grep -oE '\(([A-Z][A-Z0-9_]*)\) \[[^]]*\] \(NEW\)' "$log" | sed -E 's/\) \[.*//; s/^\(//' | sort -u || true)
             if [ -z "$NEW" ]; then
               echo "::error::第 $i 次失败，但不是 kconfig 提问导致的 —— 真错误如下"
+              if grep -q "C compiler .* not found\|No such file or directory.*-gcc" "$log"; then
+                echo "::error::（内核 kconfig 跑不到交叉编译器：toolchain 没装好，不是配置问题）"
+              fi
               grep -nE '\*\*\*|[Ee]rror:|No rule|cannot|undefined reference' "$log" | head -20 || true
               LN=$(grep -nE 'ERROR: |Error [0-9]' "$log" | tail -1 | cut -d: -f1 || true)
               if [ -n "${LN:-}" ]; then sed -n "$((LN>80 ? LN-80 : 1)),$((LN+15))p" "$log"; else tail -100 "$log"; fi
