@@ -148,14 +148,16 @@ jobs:
           # 用 printf 不用 heredoc：GitHub 的 run 块整段缩进，heredoc 会把缩进写进文件
           # 每条都要对应 Pages 上真实存在的 packages.adb（目录布局与官方 release 一致，
           # 已用 ImmortalWrt 快照实测：targets/…/packages 与 packages/<arch>/<feed> 都有 .adb）。
-          # 只列确定非空的 feed：没被选中的 feed 不产包，目录里没有 .adb，列了会让
-          # apk update 报错。下面「ASSERT package indexes」保证这四条永远不会 404。
+          # 上一轮的实测结果：pon_drivers 这个 feed 压根不产出自己的索引——
+          # 它里面全是 kmod-*，内核模块按 PACKAGE_DIR 落到 targets/.../packages 里，
+          # 由 @ponwrt 那条覆盖；而 packages/base/luci/pon_userspace 四个目录各自有 .adb。
+          # 所以这里列的就是那五条，pon_drivers 不列（列了设备上就是 404）。
           printf '%s\n' \
             '# 本仓库 GitHub Pages 包仓库（密钥固定，可与固件同轮或跨轮更新）' \
             "@ponwrt $PAGES/targets/airoha/an7581/packages/packages.adb" \
             "@ponwrt-pkg $PAGES/packages/aarch64_cortex-a53/base/packages.adb" \
+            "@ponwrt-feeds $PAGES/packages/aarch64_cortex-a53/packages/packages.adb" \
             "@ponwrt-luci $PAGES/packages/aarch64_cortex-a53/luci/packages.adb" \
-            "@ponwrt-pon_drivers $PAGES/packages/aarch64_cortex-a53/pon_drivers/packages.adb" \
             "@ponwrt-pon_userspace $PAGES/packages/aarch64_cortex-a53/pon_userspace/packages.adb" \
             > files/etc/apk/repositories.d/ponwrt.list
           if [ '${{ inputs.publish_repo }}' != 'true' ]; then
@@ -494,7 +496,7 @@ jobs:
             fi
           done
           # 反向：这四个 feed 空了说明该 feed 一个包都没编出来（上游改了配置结构）
-          for d in base luci pon_drivers pon_userspace; do
+          for d in base packages luci pon_userspace; do
             [ -s "$WORK/openwrt/bin/packages/$ARCH/$d/packages.adb" ] \
               || echo "::warning::feed $d 没有索引（apk add 用不了这个 feed）"
           done

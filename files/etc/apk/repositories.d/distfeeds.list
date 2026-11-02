@@ -9,9 +9,10 @@
 # 要装的东西来自三个确定来源：
 #   @ponwrt            本仓库 Pages 的 target 目录（同一次构建产出，密钥固定）
 #                      → 我们的自定义包（honk/natmode/pon-status/lucent）+ =m 的可选包
-#   @ponwrt-pkg/-luci/-pon_drivers/-pon_userspace
-#                      同一次构建的四个 feed 索引（packages / luci / 两个 pon feed），
-#                      少了它们这些组件在设备上永远更新不到
+#   @ponwrt-pkg / @ponwrt-feeds / @ponwrt-luci / @ponwrt-pon_userspace
+#                      同一次构建的 feed 索引（packages / luci / pon 用户态）。
+#                      pon_drivers 不单列：那个 feed 全是 kmod-*，按 PACKAGE_DIR
+#                      落进 targets/…/packages，由 @ponwrt 覆盖，它自己没有索引。
 #   @daeuniverse honk / dae（见 daeuniverse.list）
 #   手工 apk add --allow-untrusted <本地 .apk>（noarch 的 LuCI 包，如 qwe-qaq 的 snapshot Release）
 #

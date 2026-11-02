@@ -69,7 +69,10 @@ config KERNEL_DEBUG_INFO_BTF
    - 包仓库：`https://<owner>.github.io/<repo>/targets/airoha/an7581/packages/packages.adb`
      （设备里已预置成 `@ponwrt`，`apk update && apk upgrade` 只认你自己这套）
      除 target 目录外还列了 4 个 feed 源，目录布局与官方 release 一致：
-     `@ponwrt-pkg`=packages/…/base、`@ponwrt-luci`=…/luci、`@ponwrt-pon_drivers`、`@ponwrt-pon_userspace`。
+     `@ponwrt-pkg`=packages/…/base、`@ponwrt-feeds`=…/packages、`@ponwrt-luci`=…/luci、`@ponwrt-pon_userspace`=…/pon_userspace。
+     `pon_drivers` **不单独列**：那个 feed 全是 `kmod-*`，内核模块按 `PACKAGE_DIR` 落到
+     `targets/.../packages`，由 `@ponwrt` 覆盖；它自己没有索引（上一轮实测：产物里没有
+     `pon_drivers/packages.adb`，列上就是设备端 404）。
      我们的自定义包（honk / natmode / pon-status / lucent）实测落在
      `bin/packages/aarch64_cortex-a53/base/`（构建日志里的产物路径就是那里），所以走 `@ponwrt-pkg`；
      `@ponwrt` 那条覆盖 kernel 与机型专属包。
