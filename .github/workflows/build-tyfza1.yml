@@ -124,9 +124,42 @@ jobs:
           export TYFZA1_SIGNING_KEYS="$PWD/artifacts/signing"
           export TYFZA1_CONFIG="$PWD/artifacts/custom.config"
           export PATH="/usr/lib/llvm-18/bin:$PATH"
-          echo "注入用的 config：$(grep -c '^CONFIG_' "$TYFZA1_CONFIG") 条，其中我们追加的："
+          echo "注入 config：$(grep -c '^CONFIG_' "$TYFZA1_CONFIG") 条；我们追加的部分："
           sed -n '/ponwrt-xg040gmd 追加/,$p' "$TYFZA1_CONFIG" | head -30
-          sh port/scripts/build.sh sources/openwrt "$(nproc)" 2>&1 | tail -60
+          # 完整日志必须留盘：上一轮只 tail -60，真错误被截掉了，只能看见
+          # "ERROR: target/linux failed to build" 这一行没法定位。
+          if sh port/scripts/build.sh sources/openwrt "$(nproc)" > artifacts/build-full.log 2>&1; then
+            tail -40 artifacts/build-full.log
+          else
+            rc=$?
+            echo "=== build.sh 失败 rc=$rc，日志里的错误上下文 ==="
+            grep -nE 'error:|Error [0-9]|No rule|undefined reference|overflowed|too big|not enough space' \
+              artifacts/build-full.log | head -30
+            echo "=== 出错点前后 60 行 ==="
+            LN=$(grep -nE 'ERROR: .* failed to build|Error [0-9]+' artifacts/build-full.log | tail -1 | cut -d: -f1 || true)
+            if [ -n "${LN:-}" ]; then sed -n "$((LN>60 ? LN-60 : 1)),$((LN+10))p" artifacts/build-full.log; else tail -80 artifacts/build-full.log; fi
+            echo "=== 就地用 -j1 V=s 重跑失败的那部分，拿真实编译错误 ==="
+            cd sources/openwrt
+            if grep -q 'ERROR: target/linux' ../../artifacts/build-full.log; then
+              make target/compile -j1 V=s 2>&1 | tail -100
+            elif grep -q 'ERROR: package/' ../../artifacts/build-full.log; then
+              PKG=$(grep -oE 'ERROR: package/[^ ]+' ../../artifacts/build-full.log | tail -1 | cut -d' ' -f2)
+              echo "重跑 $PKG"
+              make "package/$PKG/compile" -j1 V=s 2>&1 | tail -100
+            fi
+            exit 1
+          fi
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tyfza1-build-log-${{ github.run_id }}
+          path: |
+            tyfza1/artifacts/build-full.log
+            tyfza1/artifacts/custom.config
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: ASSERT images and our additions
         run: |
