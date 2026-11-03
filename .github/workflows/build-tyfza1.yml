@@ -150,6 +150,22 @@ jobs:
           # 转手调 menuconfig，CI 无终端 → "Error opening terminal: unknown"。
           make defconfig </dev/null > "$TYFZA1_WORK/defconfig.log" 2>&1 || {
             echo "::error::make defconfig 失败"; tail -40 "$TYFZA1_WORK/defconfig.log"; exit 1; }
+          # WiFi 驱动 kmod-rtl-ax-ap 定义在 target/linux/rtl9617c/modules.mk 里
+          # （KernelPackage，里面装着 cfg80211/mac80211/rtl_ax_ap 三个 .ko）。
+          # 这类包能不能被选中要看两件事：包扫描有没有看到那个目录、以及可用性判定
+          # 读到的内核 .config 是否已经生成。第一次 defconfig 时第二件还没发生，
+          # 所以先打三个事实，不靠猜。
+          wifi_probe() {
+            echo "  [$1] 扫到了吗：tmp/.packageinfo 里 kmod-rtl-ax-ap = $(grep -c '^Package: kmod-rtl-ax-ap$' tmp/.packageinfo 2>/dev/null || echo 0) 处"
+            echo "  [$1] .config 里：$(grep -E '^CONFIG_PACKAGE_kmod-rtl-ax-ap=|^# CONFIG_PACKAGE_kmod-rtl-ax-ap is not set' .config || echo '（这行不见了 → defconfig 把它丢了）')"
+            local k; k=$(find build_dir -maxdepth 4 -type f -name .config -path '*linux-rtl9617c*' | head -1)
+            if [ -n "$k" ]; then
+              echo "  [$1] 内核侧：$k → $(grep -E '^CONFIG_(RTL_AX_AP|CFG80211|MAC80211)=' "$k" | tr '\n' ' ')"
+            else
+              echo "  [$1] 内核侧：还没有内核 .config（KernelPackage 的可用性判不出来，属预期）"
+            fi
+          }
+          wifi_probe "第 1 次 defconfig 后"
           grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config \
             || { echo "::error::defconfig 把 BTF 丢了（片段没生效？）"; exit 1; }
           # 机型必须是我们那台，不然 oldconfig 答的是别的 target。
@@ -279,6 +295,19 @@ jobs:
             grep -qx "$s" "$KC" || { echo "::error::内核缺 honk 需要的前提：$s（$KC）"; grep -nE "^#? *CONFIG_(CGROUP_BPF|NET_XGRESS|BPF_SYSCALL)" "$KC" | head; exit 1; }
           done
           echo "✅ 内核带着 BTF 与 eBPF 前提编过了，build.sh 那步不会卡在 syncconfig"
+          # 现在内核 .config 已经在（而且是编好的），KernelPackage 的可用性判定才有依据。
+          # 再 defconfig 一次，把 WiFi 那五项逼回 .config；逼不回来就在这儿红，
+          # 不要等 40 分钟后编出一个没 WiFi 的镜像。
+          echo "=== 二次 defconfig（内核配置已存在）==="
+          make defconfig </dev/null > "$TYFZA1_WORK/defconfig2.log" 2>&1 || {
+            echo "::error::二次 defconfig 失败"; tail -40 "$TYFZA1_WORK/defconfig2.log"; exit 1; }
+          wifi_probe "第 2 次 defconfig 后"
+          WIFIMISS=""
+          for p in kmod-rtl-ax-ap wpad-mbedtls wifi-scripts iw wireless-regdb; do
+            grep -qx "CONFIG_PACKAGE_$p=y" .config || WIFIMISS="$WIFIMISS $p"
+          done
+          [ -z "$WIFIMISS" ] || { echo "::error::二次 defconfig 后仍没选中 WiFi 组件:$WIFIMISS"; exit 1; }
+          echo "✅ WiFi 五项全选中（kmod-rtl-ax-ap 内含 cfg80211/mac80211/rtl_ax_ap）"
 
       # ---------- 把自己编的包仓库变成设备上的更新源（关掉开关就是纯上游行为）----------
       - name: Put our apk sources into the image
@@ -410,6 +439,24 @@ jobs:
           done
           [ -z "$MISS" ] || { echo "::error::所有 rootfs 里都没有这些包:$MISS"; exit 1; }
           echo "✅ 我们加的包都在镜像里（并集判据，$(printf '%s\n' "$ROOTS" | wc -l) 份 rootfs）"
+          # WiFi 是上游明确承诺的功能（README「网络 → 无线」、manifest 的
+          # preinstalled_kmods 里有 kmod-rtl-ax-ap）。这个包内含 cfg80211/mac80211/
+          # rtl_ax_ap 三个 .ko —— 它一缺设备就没有任何 radio，所以在这里硬判，
+          # 不再让"编成功了但没 WiFi"过关。
+          echo "=== 2b) WiFi 栈必须真在镜像里 ==="
+          WK=""
+          for r in $ROOTS; do grep -qs '^P:kmod-rtl-ax-ap$' "$r/lib/apk/db/installed" && { WK="$r"; break; }; done
+          if [ -z "$WK" ]; then
+            echo "::error::镜像里没有 kmod-rtl-ax-ap —— 刷上去不会有任何 wlan 接口"
+            for r in $ROOTS; do
+              echo "  $r 里 WiFi 相关：$(grep -oE '^P:[A-Za-z0-9._+-]+' "$r/lib/apk/db/installed" 2>/dev/null | cut -c3- | grep -iE 'rtl|80211|wpad|wifi|regdb' | tr '\n' ' ')"
+            done
+            exit 1
+          fi
+          echo "  kmod-rtl-ax-ap 在：$WK"
+          echo "  该 rootfs 里 WiFi 相关包：$(grep -oE '^P:[A-Za-z0-9._+-]+' "$WK/lib/apk/db/installed" | cut -c3- | grep -iE 'rtl|80211|wpad|wifi|regdb|^iw$' | tr '\n' ' ')"
+          KO=$(find "$WK/lib/modules" -name 'rtl_ax_ap.ko*' 2>/dev/null | head -1)
+          [ -n "$KO" ] && echo "  驱动文件：$KO" || echo "::warning::rootfs 里没找到 rtl_ax_ap.ko（包记录了但文件没落地？检查 KernelPackage FILES）"
           echo "=== 3) 实体文件（同样按并集找）==="
           MISSBIN=""
           for f in usr/bin/honk-core etc/init.d/honk; do
