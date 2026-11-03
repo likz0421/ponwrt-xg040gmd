@@ -437,7 +437,21 @@ jobs:
           [ -n "$LUCI_OK" ] || echo "::warning::rootfs 里没找到 honk 的 LuCI menu.d 条目（界面可能进不去，检查 luci-app-honk 载荷）"
           RP=""
           for r in $ROOTS; do [ -s "$r/etc/apk/repositories.d/ponwrt.list" ] && { RP="$r"; break; }; done
-          echo "✅ 设备侧 apk 源与公钥已进镜像（$RP）：$(cat "$RP"/etc/apk/repositories.d/*.list | grep -cE '^@') 条源，$(ls "$RP"/etc/apk/keys | wc -l) 把钥匙"
+          # 光"文件在"不够：内容必须是我们的源、distfeeds 不能有生效行、
+          # 镜像里的公钥必须就是本次签名用的那把（否则 Pages 发了设备也认不到）
+          grep -qs "targets/airoha/an7581/packages/packages.adb" "$RP/etc/apk/repositories.d/ponwrt.list" \
+            || { echo "::error::镜像里的 ponwrt.list 没写自建源"; cat "$RP/etc/apk/repositories.d/ponwrt.list"; exit 1; }
+          NACT=$(awk '!/^#/ && NF>0 {n++} END{print n+0}' "$RP/etc/apk/repositories.d/distfeeds.list")
+          [ "$NACT" = 0 ] || { echo "::error::distfeeds.list 里还有 $NACT 行生效源（官方 snapshots 没被覆盖掉）"; exit 1; }
+          KEYHIT=""
+          for r in $ROOTS; do
+            for k in "$r"/etc/apk/keys/*; do
+              [ -f "$k" ] || continue
+              cmp -s "$k" public-key.pem && { KEYHIT="$k"; break 2; }
+            done
+          done
+          [ -n "$KEYHIT" ] || { echo "::error::/etc/apk/keys 里没有与本次签名公钥（$(sha256sum public-key.pem | cut -c1-16)…）一致的钥匙"; exit 1; }
+          echo "✅ 设备侧 apk 源与公钥已进镜像（$RP）：$(cat "$RP"/etc/apk/repositories.d/*.list | grep -cE '^@') 条源，公钥=$KEYHIT"
           # 内核自带 BTF，不该出现 blob 版 vmlinux-btf
           if grep -qE '^vmlinux-btf - ' "$MAN"; then
             echo "::error::成品里装了 blob 版 vmlinux-btf（我们该用 vmlinux-btf-builtin）"; exit 1

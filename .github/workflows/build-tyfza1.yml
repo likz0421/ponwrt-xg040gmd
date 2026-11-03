@@ -431,6 +431,58 @@ jobs:
           [ -n "$THEMEDIR" ] && echo "✅ 主题静态资源：$THEMEDIR" \
             || echo "::warning::rootfs 里没按 *lucent* 命名找到主题资源，刷机后在 /www/htdocs/luci-static 下确认"
 
+      # 上一条只判"包在不在镜像里"，没判源文件和公钥有没有落进 rootfs。
+      # 少了这一步，可能出现"Pages 发了、索引也能下载，但固件里根本没有那条源"，
+      # 设备上还是只能用上游写死的官方 snapshots —— 又是一类假绿。
+      - name: ASSERT apk sources landed in the image
+        if: inputs.publish_repo == 'true'
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK/sources/openwrt"
+          PAGES="https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY#*/}/tyfza1"
+          ROOTS=$(find build_dir -maxdepth 3 -type d -name 'root-*' ! -name 'root.orig*' | sort)
+          [ -n "$ROOTS" ] || { echo "::error::找不到装配好的 rootfs"; exit 1; }
+          MISS=""
+          for f in etc/apk/repositories.d/ponwrt.list etc/apk/repositories.d/distfeeds.list; do
+            hit=""
+            for r in $ROOTS; do [ -s "$r/$f" ] && { hit="$r/$f"; break; }; done
+            [ -n "$hit" ] || MISS="$MISS $f"
+          done
+          LIST=""
+          for r in $ROOTS; do [ -s "$r/etc/apk/repositories.d/ponwrt.list" ] && { LIST="$r/etc/apk/repositories.d/ponwrt.list"; break; }; done
+          if [ -n "$LIST" ]; then
+            echo "镜像里的源文件：$LIST"
+            sed 's/^/    /' "$LIST"
+            grep -q "$PAGES/targets/rtl9617c/generic/packages/packages.adb" "$LIST" \
+              || MISS="$MISS ponwrt.list 里没有我们那条自建源"
+            # distfeeds 必须已经被我们覆盖成注释版，否则官方 snapshots 源还在设备上
+            DF=""
+            for r in $ROOTS; do [ -s "$r/etc/apk/repositories.d/distfeeds.list" ] && { DF="$r/etc/apk/repositories.d/distfeeds.list"; break; }; done
+            [ -n "$DF" ] && {
+              echo "镜像里的 distfeeds（应全为注释）：$DF"
+              # 用 awk 而不是 `grep -c … | sed`：grep -c 在计数为 0 时返回 1，
+              # pipefail + set -e 下会把"一切正常"那棵树直接判死（本地跑出来的假失败）
+              printf '    非注释行数=%s\n' "$(awk '!/^#/ && NF>0 {n++} END{print n+0}' "$DF")"
+            }
+            if [ -n "$DF" ] && [ "$(awk '!/^#/ && NF>0 {n++} END{print n+0}' "$DF")" != "0" ]; then
+              MISS="$MISS distfeeds.list 里还有生效的官方源"
+            fi
+          fi
+          KEYHIT=""
+          for r in $ROOTS; do
+            for k in "$r"/etc/apk/keys/*; do
+              [ -f "$k" ] || continue
+              if cmp -s "$k" public-key.pem; then KEYHIT="$k"; break 2; fi
+            done
+          done
+          [ -n "$KEYHIT" ] || MISS="$MISS /etc/apk/keys 里没有与本次签名公钥一致的钥匙"
+          if [ -n "$MISS" ]; then
+            echo "::error::apk 源没有真正进镜像:$MISS"
+            for r in $ROOTS; do echo "  $r"; ls -l "$r/etc/apk/repositories.d" "$r/etc/apk/keys" 2>&1 | sed 's/^/      /'; done
+            exit 1
+          fi
+          echo "✅ 自建源与固定公钥已在镜像里（钥匙文件 $KEYHIT）"
+
       # 固件里写的每一条源，都必须有本次构建真实产出的索引对着 —— 对不上就别发，
       # 否则设备表现是"固件一切正常，apk update 一路 404"。
       - name: ASSERT package indexes
