@@ -531,23 +531,18 @@ jobs:
         if: inputs.publish_repo == 'true'
         run: |
           set -euo pipefail
-          SRC="$WORK/openwrt/bin/targets/airoha/an7581/packages"
+          cd "$WORK/openwrt"
+          ARCH=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"$/\1/p' .config)
+          SRC="bin/targets/airoha/an7581/packages"
           [ -d "$SRC" ] || { echo "::error::没有包仓库目录 $SRC"; exit 1; }
-          TMP="$RUNNER_TEMP/website"
-          mkdir -p "$TMP/targets/airoha/an7581/packages"
-          cp -a "$SRC/." "$TMP/targets/airoha/an7581/packages/"
-          # 架构级 per-feed 仓库（=m 的包只出现在这里，按需安装要靠它）
-          if [ -d "$WORK/openwrt/bin/packages" ]; then
-            mkdir -p "$TMP/packages"
-            cp -a "$WORK/openwrt/bin/packages/." "$TMP/packages/"
-          fi
-          du -sh "$TMP"
-          git -C "$TMP" init -q
-          git -C "$TMP" -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-              add -A -f && git -C "$TMP" -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-              commit -q -m "apk repo $SOURCE_SHA run $GITHUB_RUN_ID"
-          git -C "$TMP" branch -M gh-pages
-          git -C "$TMP" push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          # 换成共享脚本，不再 git init + push -f：同一个 Pages 站点上 TYFZA1 发在
+          # tyfza1/ 子树，整支覆盖会把它的索引抹掉（对方设备 apk update 全线 404，
+          # 两边作业却都是绿的）。这个脚本只替换我们自己这两块子树。
+          PAGES_GIT_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+          PAGES_WORK="$RUNNER_TEMP/website" \
+          bash "$GITHUB_WORKSPACE/ctrl/scripts/publish-pages.sh" \
+            "$SRC" "targets/airoha/an7581/packages" \
+            "bin/packages/$ARCH" "packages/$ARCH"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

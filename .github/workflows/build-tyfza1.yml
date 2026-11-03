@@ -11,8 +11,13 @@ name: build-tyfza1
 
 on:
   workflow_dispatch:
-    # 没有开关：这台机器要加的就是 eBPF/BTF + honk + 我自己的主题，
-    # stage-tyfza1.sh 三件都会放，成品断言也按这三件查。
+    inputs:
+      publish_repo:
+        description: '发这台机器的 apk 包仓库到 Pages，并把设备源写进固件（关掉就是纯上游行为）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 permissions:
   contents: write
@@ -275,6 +280,60 @@ jobs:
           done
           echo "✅ 内核带着 BTF 与 eBPF 前提编过了，build.sh 那步不会卡在 syncconfig"
 
+      # ---------- 把自己编的包仓库变成设备上的更新源（关掉开关就是纯上游行为）----------
+      - name: Put our apk sources into the image
+        if: inputs.publish_repo == 'true'
+        env:
+          # Secret 不会自动变成环境变量，必须在步骤级显式映射
+          PONWRT_SIGNING_KEYS: ${{ secrets.PONWRT_SIGNING_KEYS }}
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          T="$PWD/sources/openwrt"
+          # 和 XG 用同一把固定钥匙：rules.mk:354-355 就是
+          # BUILD_KEY_APK_SEC=$(TOPDIR)/private-key.pem、PUB=$(TOPDIR)/public-key.pem；
+          # base-files 会把公钥装进镜像 /etc/apk/keys/，索引也用这把签 —— 钥匙换了
+          # 老固件就永远验签失败，所以它必须是 secret 里那一份固定的。
+          bash "$GITHUB_WORKSPACE/ctrl/scripts/restore-signing-key.sh" "$T"
+          ARCH=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"$/\1/p' "$T/.config")
+          [ -n "$ARCH" ] || { echo "::error::读不到 CONFIG_TARGET_ARCH_PACKAGES"; exit 1; }
+          [ "$(sed -n 's/^CONFIG_PER_FEED_REPO=//p' "$T/.config" | head -1)" = "y" ] \
+            || { echo "::error::上游没开 CONFIG_PER_FEED_REPO，包目录布局和预期不同，先别写死源"; exit 1; }
+          OWNER="${GITHUB_REPOSITORY%%/*}"; REPO="${GITHUB_REPOSITORY#*/}"
+          # tyfza1/ 子路径：两条产品线共用同一个 Pages 站点，各占一块才不会互相抹掉
+          PAGES="https://${OWNER}.github.io/${REPO}/tyfza1"
+          mkdir -p "$T/files/etc/apk/repositories.d"
+          printf '%s\n' \
+            '# 本仓库 GitHub Pages 包仓库（与固件同一次构建产出，签名钥匙固定）' \
+            "@ponwrt $PAGES/targets/rtl9617c/generic/packages/packages.adb" \
+            "@ponwrt-pkg $PAGES/packages/$ARCH/base/packages.adb" \
+            > "$T/files/etc/apk/repositories.d/ponwrt.list"
+          # 其余 feed 各自一个目录（include/feeds.mk 的 PACKAGE_SUBDIRS 就是这个布局）；
+          # packages 这个 feed 的产物目录叫 base，上面已经写过
+          for f in "$T"/package/feeds/*; do
+            [ -d "$f" ] || continue
+            name=$(basename "$f")
+            [ "$name" = packages ] && continue
+            printf '%s\n' "@ponwrt-$name $PAGES/packages/$ARCH/$name/packages.adb" \
+              >> "$T/files/etc/apk/repositories.d/ponwrt.list"
+          done
+          # 上游 sync-overlay 第 55 行把 CONFIG_VERSION_REPO 写死成官方 snapshots，
+          # 于是 base-files 生成的 distfeeds.list 指向滚动快照：库版本和内核 vermagic
+          # 都和我们这套不同（本固件内核自编 + BTF/FTRACE），装上就会坏。
+          # 整份换成注释头，只留上面我们自己那条。
+          printf '%s\n' \
+            '# 覆盖上游生成的 distfeeds.list：不用官方 snapshots 源（自建源见 ponwrt.list）。' \
+            '# 官方源的 kmod-* 按他们自己的内核编；本固件内核版本/配置不同，装了 modprobe 会失败。' \
+            > "$T/files/etc/apk/repositories.d/distfeeds.list"
+          echo "== 写进固件的源 =="; sed 's/^/  /' "$T/files/etc/apk/repositories.d/ponwrt.list"
+          for l in $(grep -E '^@' "$T/files/etc/apk/repositories.d/ponwrt.list" | awk '{print $2}'); do
+            case "$l" in
+              "$PAGES"/*) ;;
+              *) echo "::error::源地址前缀不对：$l（期望 $PAGES/）"; exit 1 ;;
+            esac
+          done
+          echo "✅ 设备源已写进 files/ 覆盖层（rootfs 装配时生效）"
+
       - name: Build OpenWrt and native PE
         run: |
           set -euo pipefail
@@ -372,6 +431,35 @@ jobs:
           [ -n "$THEMEDIR" ] && echo "✅ 主题静态资源：$THEMEDIR" \
             || echo "::warning::rootfs 里没按 *lucent* 命名找到主题资源，刷机后在 /www/htdocs/luci-static 下确认"
 
+      # 固件里写的每一条源，都必须有本次构建真实产出的索引对着 —— 对不上就别发，
+      # 否则设备表现是"固件一切正常，apk update 一路 404"。
+      - name: ASSERT package indexes
+        if: inputs.publish_repo == 'true'
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK/sources/openwrt"
+          PAGES="https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY#*/}/tyfza1"
+          L=files/etc/apk/repositories.d/ponwrt.list
+          MISS=""
+          for u in $(grep -E '^@' "$L" | awk '{print $2}'); do
+            case "$u" in
+              "$PAGES"/*) ;;
+              *) echo "::error::源地址不是本仓库 Pages：$u"; exit 1 ;;
+            esac
+            p="bin/${u#$PAGES/}"
+            if [ -s "$p" ]; then
+              echo "✅ ${u#$PAGES/}  $(du -h "$p" | cut -f1)"
+            else
+              MISS="$MISS $u"
+            fi
+          done
+          if [ -n "$MISS" ]; then
+            echo "::error::镜像里写了这些源，但本次构建没产出对应索引:$MISS"
+            find bin -name packages.adb | sed 's/^/    /'
+            exit 1
+          fi
+          echo "✅ 设备源与本次产物一一对应"
+
       - name: Package release artifacts
         run: |
           set -euo pipefail
@@ -393,10 +481,60 @@ jobs:
             1. 内核 BTF + honk 需要的 eBPF/TC 模块
             2. honk（daeuniverse）：官方 release 静态二进制包 + luci-app-honk + luci-lib-daeuniverse
             3. 主题 luci-theme-lucent（argon 仍在，按上游要求保留）
+            设备 apk 源（本次构建自产，钥匙与 XG 那条线同一把）：
+            <https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/tyfza1/targets/rtl9617c/generic/packages/packages.adb>
+            —— 只有 `publish_repo=true` 才会发仓库并覆盖上游写死的官方 snapshots 源；
+            关掉时行为与纯上游一致（官方 snapshot 源 + 每轮临时钥匙）。
             RTL9617C 与 AN7581 是不同 target，本产物只用于 TYFZA1。
             刷入见上游 README：先装他们的原生 U-Boot，恢复页 http://192.168.0.1。
           files: ${{ github.workspace }}/tyfza1/artifacts/release/*
           fail_on_unmatched_files: false
+
+      - name: Publish apk repository to Pages
+        if: inputs.publish_repo == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK/sources/openwrt"
+          ARCH=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"$/\1/p' .config)
+          [ -d "bin/packages/$ARCH" ] || { echo "::error::没有 bin/packages/$ARCH"; ls bin/packages; exit 1; }
+          [ -d bin/targets/rtl9617c/generic/packages ] \
+            || { echo "::error::没有 bin/targets/rtl9617c/generic/packages"; find bin/targets -maxdepth 3 -type d | sed 's/^/  /'; exit 1; }
+          # 用共享脚本：只替换 tyfza1/ 这块子树，XG 发在根路径的那份必须原样留着
+          # （两条线共用同一个 Pages 站点，谁 git init + push -f 就会把对方抹成 404）
+          PAGES_GIT_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+          PAGES_WORK="$RUNNER_TEMP/pages" \
+          bash "$GITHUB_WORKSPACE/ctrl/scripts/publish-pages.sh" \
+            bin/targets/rtl9617c/generic/packages "tyfza1/targets/rtl9617c/generic/packages" \
+            "bin/packages/$ARCH" "tyfza1/packages/$ARCH"
+
+      - name: Ensure Pages serves our indexes
+        if: inputs.publish_repo == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY/pages"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$api")
+          echo "Pages 站点现状：HTTP $code"
+          if [ "$code" != "200" ]; then
+            c2=$(curl -s -o pages-post.json -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+              -d '{"source":{"branch":"gh-pages","path":"/"}}' "$api")
+            echo "启用：HTTP $c2"; head -c 300 pages-post.json || true
+            case "$c2" in 201|202|409) ;; *) echo "::error::启用 Pages 失败"; exit 1 ;; esac
+          fi
+          REPO="${GITHUB_REPOSITORY#*/}"
+          url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO}/tyfza1/targets/rtl9617c/generic/packages/packages.adb"
+          for t in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            c3=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)
+            echo "探测 $t：HTTP $c3  $url"
+            if [ "$c3" = "200" ]; then echo "✅ TYFZA1 设备源可下载"; exit 0; fi
+            sleep 20
+          done
+          echo "::error::Pages 站点在，但 TYFZA1 的索引下不到（$url）"
+          exit 1
 
       - name: Summary
         if: always()
