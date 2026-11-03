@@ -154,10 +154,26 @@ jobs:
           rm -f tmp/.packageinfo tmp/.targetinfo \
                 tmp/info/.files-packageinfo.stamp tmp/info/.files-packageinfo-* \
                 tmp/info/.files-targetinfo.stamp tmp/info/.files-targetinfo-*
+          # 扫描失败默认是看不见的：scan.mk 用 `make -r DUMP=1 … 2>/dev/null || { 把原因
+          # 写进 logs/<目录>/dump.txt 后删掉产物 }`。所以只报"缺不缺"定不了位，
+          # 这里显式带 V=s 重扫一次，并把四份索引和 dump 一起打出来。
+          scan_diag() {
+            local f n c
+            for f in tmp/.packageinfo tmp/.targetinfo tmp/.config-package.in tmp/.config-target.in; do
+              if [ -f "$f" ]; then n=$(wc -l < "$f"); c=$(grep -c 'rtl-ax-ap' "$f" || true); else n='-'; c='-'; fi
+              printf '  %-24s 行数=%-7s rtl-ax-ap 命中=%s\n' "$f" "$n" "$c"
+            done
+            return 0
+          }
+          make -s prepare-tmpinfo V=s > "$TYFZA1_WORK/tmpinfo.log" 2>&1 || echo "::warning::prepare-tmpinfo 非 0 退出，看下面的扫描诊断"
+          echo "=== 包扫描诊断 ==="; scan_diag
+          echo "--- tmpinfo.log 里的错误行 ---"; grep -inE "error|failed|nothing to be done" "$TYFZA1_WORK/tmpinfo.log" | head -12 || true
+          if [ -d logs ]; then find logs -name 'dump.txt' 2>/dev/null | head -5 | while read -r d; do echo "== $d"; tail -15 "$d"; done; fi
           # tools/install 之前必须先 defconfig：否则 toplevel.mk 把 .config 当过期目标，
           # 转手调 menuconfig，CI 无终端 → "Error opening terminal: unknown"。
           make defconfig </dev/null > "$TYFZA1_WORK/defconfig.log" 2>&1 || {
             echo "::error::make defconfig 失败"; tail -40 "$TYFZA1_WORK/defconfig.log"; exit 1; }
+          echo "=== defconfig 之后再扫一遍诊断 ==="; scan_diag
           # WiFi 驱动 kmod-rtl-ax-ap 定义在 target/linux/rtl9617c/modules.mk 里
           # （KernelPackage，里面装着 cfg80211/mac80211/rtl_ax_ap 三个 .ko）。
           # 这类包能不能被选中要看两件事：包扫描有没有看到那个目录、以及可用性判定
