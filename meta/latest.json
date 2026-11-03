@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "generated_at_utc": "2026-11-03T17:33:56Z",
+  "device": "xg040gmd",
+  "target": "airoha/an7581",
+  "profile": "nokia_xg-040g-md-ubi",
+  "release_tag": "stable-xg040gmd",
+  "firmware": "ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-squashfs-sysupgrade.itb",
+  "size_bytes": "32031021",
+  "sha256": "556e9d6cf92092fbedf0e4eafca51744f420731a80014eb281343dcd1c843c01",
+  "built_at": "2026-11-03T07:02:23Z",
+  "built_at_local": "2026-11-03 15:02 UTC+8",
+  "run_id": "41580002244",
+  "run_url": "https://github.com/likz0421/ponwrt-xg040gmd/actions/runs/41580002244",
+  "release_url": "https://github.com/likz0421/ponwrt-xg040gmd/releases/tag/stable-xg040gmd",
+  "firmware_url": "https://github.com/likz0421/ponwrt-xg040gmd/releases/download/stable-xg040gmd/ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-squashfs-sysupgrade.itb",
+  "sha256sums_url": "https://github.com/likz0421/ponwrt-xg040gmd/releases/download/stable-xg040gmd/sha256sums",
+  "apk_target_index": "https://likz0421.github.io/ponwrt-xg040gmd/targets/airoha/an7581/packages/packages.adb",
+  "wifi_driver": "kmod-mt76-connac",
+  "notes": "另有 -ubi-usb-sfp 与两个 recovery 变体，全清单见 sha256sums_url"
+}
