@@ -146,6 +146,14 @@ jobs:
           [ -d sources/openwrt/target/linux/rtl9617c ] \
             || { echo "::error::overlay 之后仍然没有 target/linux/rtl9617c"; exit 1; }
           cd sources/openwrt
+          # 扫描缓存必须作废：第 11 步的 stage-honk 在 sync-overlay 之前跑过一次
+          # prepare-tmpinfo，那趟扫描的树里根本没有 target/linux/rtl9617c，而 stamp 比
+          # tmp/.version 新 → 之后 make defconfig 不重扫，KernelPackage/rtl-ax-ap
+          # 全程没进过 tmp/.packageinfo（本轮探针实测 0 处，于是 .config 里那行被丢，
+          # 镜像里就没有 WiFi 驱动）。名字也别赌错：真 stamp 是 .files-packageinfo*。
+          rm -f tmp/.packageinfo tmp/.targetinfo \
+                tmp/info/.files-packageinfo.stamp tmp/info/.files-packageinfo-* \
+                tmp/info/.files-targetinfo.stamp tmp/info/.files-targetinfo-*
           # tools/install 之前必须先 defconfig：否则 toplevel.mk 把 .config 当过期目标，
           # 转手调 menuconfig，CI 无终端 → "Error opening terminal: unknown"。
           make defconfig </dev/null > "$TYFZA1_WORK/defconfig.log" 2>&1 || {
@@ -156,14 +164,19 @@ jobs:
           # 读到的内核 .config 是否已经生成。第一次 defconfig 时第二件还没发生，
           # 所以先打三个事实，不靠猜。
           wifi_probe() {
-            echo "  [$1] 扫到了吗：tmp/.packageinfo 里 kmod-rtl-ax-ap = $(grep -c '^Package: kmod-rtl-ax-ap$' tmp/.packageinfo 2>/dev/null || echo 0) 处"
-            echo "  [$1] .config 里：$(grep -E '^CONFIG_PACKAGE_kmod-rtl-ax-ap=|^# CONFIG_PACKAGE_kmod-rtl-ax-ap is not set' .config || echo '（这行不见了 → defconfig 把它丢了）')"
-            local k; k=$(find build_dir -maxdepth 4 -type f -name .config -path '*linux-rtl9617c*' | head -1)
+            # 处处 || true：这是诊断，不该诊断自己把作业弄红。上一版里
+            # `k=$(find build_dir …)` 在还没有 build_dir 时返回 1，pipefail+set -e
+            # 直接死在第 1 次探针上，反而没看到后面的证据。
+            local k=""
+            echo "  [$1] 扫到了吗：tmp/.packageinfo 里 kmod-rtl-ax-ap = $(grep -c '^Package: kmod-rtl-ax-ap$' tmp/.packageinfo 2>/dev/null || true) 处"
+            echo "  [$1] .config 里：$(grep -E '^CONFIG_PACKAGE_kmod-rtl-ax-ap=|^# CONFIG_PACKAGE_kmod-rtl-ax-ap is not set' .config 2>/dev/null || echo '（这行不见了 → defconfig 把它丢了）')"
+            k=$(find build_dir -maxdepth 4 -type f -name .config -path '*linux-rtl9617c*' 2>/dev/null | head -1 || true)
             if [ -n "$k" ]; then
-              echo "  [$1] 内核侧：$k → $(grep -E '^CONFIG_(RTL_AX_AP|CFG80211|MAC80211)=' "$k" | tr '\n' ' ')"
+              echo "  [$1] 内核侧：$k → $(grep -E '^CONFIG_(RTL_AX_AP|CFG80211|MAC80211)=' "$k" 2>/dev/null | tr '\n' ' ' || true)"
             else
               echo "  [$1] 内核侧：还没有内核 .config（KernelPackage 的可用性判不出来，属预期）"
             fi
+            return 0
           }
           wifi_probe "第 1 次 defconfig 后"
           grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config \
