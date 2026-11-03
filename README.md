@@ -3,8 +3,31 @@
 自己的构建仓库，不是任何人的 fork。只按固定 commit 拉上游源码，
 配置 = **上游原样 + 16 个符号的差异**，其余一律继承上游默认值。
 
-设备：诺基亚贝尔 XG-040G-MD · AN7581DT（2×Cortex-A53 + 4 核 NPU）· 512MB RAM · 256MB NAND · 无 WiFi
+设备：诺基亚贝尔 XG-040G-MD · AN7581DT（2×Cortex-A53 + 4 核 NPU）· 512MB RAM · 256MB NAND
 profile：`nokia_xg-040g-md-ubi` · 架构 `aarch64_cortex-a53` · 包管理 **apk**（没有 opkg）
+WiFi：固件内含 `kmod-mt76-core/connac` + `wpad-openssl`（上游 an7581 配置带进来的）；这台机器有没有实体射频，刷完用 `iw phy` 实测为准。
+
+## 当前固件 · 怎么确认有没有新版本
+
+两条线都用**滚动 tag**（设备上的 apk 源和 `install.sh` 要固定地址），而 GitHub 不改 release 的
+`published_at`、tag 页资产列表又是前端渲染 —— 所以别用肉眼盯发布页，问这两个 JSON：
+
+```
+https://likz0421.github.io/ponwrt-xg040gmd/meta/latest.json          # XG-040G-MD
+https://likz0421.github.io/ponwrt-xg040gmd/tyfza1/meta/latest.json   # TYFZA1
+```
+
+每轮构建由 `scripts/make-latest.sh` 生成、`publish-pages.sh` 发到 Pages 的叶子目录（`meta/`、
+`tyfza1/meta/`），字段含 `firmware` / `size_bytes` / `sha256` / `built_at_local` / `run_id` /
+`firmware_url` / `apk_target_index`。判断新旧只比 `sha256` 与 `built_at_local`：
+
+| 设备 | 当前版本 | 固件 | sha256（前 12 位） |
+|---|---|---|---|
+| XG-040G-MD | 2026-11-03 15:02 UTC+8 · run 41580002244 | `…-ubi-squashfs-sysupgrade.itb` 32,031,021 B | `556e9d6cf920` |
+| TYFZA1 | 2026-11-03 22:16 UTC+8 · run 41642698943 | `sysupgrade.bin` 29,542,714 B | `394c47637f4b` |
+
+设备上更新走内置的自建源：`apk update && apk upgrade`（源列表就是上面 `apk_target_index` 那套）。
+电脑上只想确认下载到的固件是不是最新一轮：比对 `latest.json` 的 `sha256` 与本地 `sha256sum` 输出即可。
 
 ## 目录
 
@@ -15,6 +38,9 @@ configs/xg-040g-md.diff.config        与上游的差异（插件 + BTF/eBPF + h
 scripts/fetch-plugins.sh              按 SHA 取 natmode / pon-status / 主题，断言进索引
 scripts/stage-honk.sh                 生成 in-tree honk wrapper 包 + 取 luci-app-honk / luci-lib-daeuniverse 源码
 scripts/restore-signing-key.sh        从 Secret 还原固定 apk 签名密钥（缺 Secret 直接失败）
+scripts/stage-tyfza1.sh               TYFZA1：用上游 TYFZA1_CONFIG 扩展点派生 config + 放主题/honk
+scripts/publish-pages.sh              发 Pages 且**只替换自己那棵子树**（两线共用站点）
+scripts/make-latest.sh                生成本轮的 latest.json 版本指针（缺 sha256/下载链就拒绝）
 files/etc/apk/repositories.d/         设备上的源：关滚动 snapshot，只留自建 Pages 源
 .github/workflows/build.yml           XG-040G-MD（Airoha AN7581）构建 + 断言 + 发 Release + 包仓库上 Pages
 .github/workflows/build-tyfza1.yml    天翼 TYFZA1（Realtek RTL9617C）独立构建线
