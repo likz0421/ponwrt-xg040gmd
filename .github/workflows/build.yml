@@ -521,6 +521,28 @@ jobs:
           fi
           echo "✅ 设备侧 apk 源与本次产物一一对应"
 
+      - name: Compute build stamp
+        # 滚动 tag 不改 published_at、资产同名覆盖重建，页面看不出"有没有新构建"。
+        # 这里一次算好 UTC+8 时间、主固件大小与 sha256，后面的 Release 盖戳、
+        # latest.json 和作业摘要都读同一份，不再各算各的。
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M') UTC+8"
+          FW=$(ls "$GITHUB_WORKSPACE"/out/*squashfs-sysupgrade.itb 2>/dev/null | head -1 || true)
+          [ -n "${FW:-}" ] || { echo "::error::out/ 里没有 sysupgrade 固件，盖不了戳"; ls -l "$GITHUB_WORKSPACE/out"; exit 1; }
+          NAME=$(basename "$FW")
+          SZ=$(stat -c %s "$FW")
+          SH=$(sha256sum "$FW" | cut -d' ' -f1)
+          AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          {
+            echo "BUILD_STAMP=$STAMP"
+            echo "FIRMWARE_NAME=$NAME"
+            echo "FIRMWARE_SIZE=$SZ"
+            echo "FIRMWARE_SHA256=$SH"
+            echo "BUILT_AT=$AT"
+          } >> "$GITHUB_ENV"
+          echo "本轮固件：$NAME · $SZ B · sha256 $SH（$STAMP）"
+
       - name: Publish firmware to Release
         uses: softprops/action-gh-release@v2
         with:
@@ -559,6 +581,44 @@ jobs:
             "bin/packages/$ARCH" "packages/$ARCH"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 不受 publish_repo 开关影响：这份指针只回答一个问题 —— "现在最新的是哪一版"。
+      # 值一律走 env 传进来，不把 ${{ }} 直接插进 shell 脚本（避免内容里的引号/反引号改变命令）。
+      - name: Publish latest.json pointer to Pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_STAMP: ${{ env.BUILD_STAMP }}
+          BUILT_AT: ${{ env.BUILT_AT }}
+          FIRMWARE_NAME: ${{ env.FIRMWARE_NAME }}
+          FIRMWARE_SIZE: ${{ env.FIRMWARE_SIZE }}
+          FIRMWARE_SHA256: ${{ env.FIRMWARE_SHA256 }}
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cd "$WORK/openwrt"
+          bash "$GITHUB_WORKSPACE/ctrl/scripts/make-latest.sh" "$WORK/meta" \
+            device=xg040gmd \
+            target=airoha/an7581 \
+            profile=nokia_xg-040g-md-ubi \
+            release_tag=stable-xg040gmd \
+            firmware="$FIRMWARE_NAME" \
+            size_bytes="$FIRMWARE_SIZE" \
+            sha256="$FIRMWARE_SHA256" \
+            built_at="$BUILT_AT" \
+            built_at_local="$BUILD_STAMP" \
+            run_id="$GITHUB_RUN_ID" \
+            run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/stable-xg040gmd" \
+            firmware_url="https://github.com/$GITHUB_REPOSITORY/releases/download/stable-xg040gmd/$FIRMWARE_NAME" \
+            sha256sums_url="https://github.com/$GITHUB_REPOSITORY/releases/download/stable-xg040gmd/sha256sums" \
+            apk_target_index="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY}/targets/airoha/an7581/packages/packages.adb" \
+            wifi_driver=kmod-mt76-connac \
+            source_sha="$SOURCE_SHA" \
+            notes="另有 -ubi-usb-sfp 与两个 recovery 变体，全清单见 sha256sums_url；判断新旧只看 sha256 与 built_at_local"
+          PAGES_GIT_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+          PAGES_WORK="$RUNNER_TEMP/pages-meta" \
+            bash "$GITHUB_WORKSPACE/ctrl/scripts/publish-pages.sh" \
+              "$WORK/meta" "meta"
 
       - name: Ensure Pages enabled
         if: inputs.publish_repo == 'true'

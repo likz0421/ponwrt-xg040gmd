@@ -771,6 +771,38 @@ jobs:
             bin/targets/rtl9617c/generic/packages "tyfza1/targets/rtl9617c/generic/packages" \
             "bin/packages/$ARCH" "tyfza1/packages/$ARCH"
 
+      # 不受 publish_repo 开关影响：这份指针的唯一用途是"人/脚本能不能一眼看出有没有新固件"，
+      # 关掉自建源的时候更需要它。
+      - name: Publish latest.json pointer to Pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK"
+          bash "$GITHUB_WORKSPACE/ctrl/scripts/make-latest.sh" "$PWD/artifacts/meta" \
+            device=tyfza1 \
+            target=rtl9617c/generic \
+            profile=tianyi_tyfza1 \
+            release_tag=tyfza1-plus \
+            firmware="$IMG_NAME" \
+            size_bytes="$IMG_SIZE" \
+            sha256="$IMG_SHA" \
+            built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            built_at_local="$BUILD_STAMP" \
+            run_id="$GITHUB_RUN_ID" \
+            run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/tyfza1-plus" \
+            firmware_url="https://github.com/$GITHUB_REPOSITORY/releases/download/tyfza1-plus/$IMG_NAME" \
+            sha256sums_url="https://github.com/$GITHUB_REPOSITORY/releases/download/tyfza1-plus/SHA256SUMS" \
+            apk_target_index="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY}/tyfza1/targets/rtl9617c/generic/packages/packages.adb" \
+            wifi_driver=kmod-rtl-ax-ap \
+            upstream_sha="$TYFZA1_SHA" \
+            notes="判断新旧只看 sha256 与 built_at_local；滚动 tag 不改 published_at"
+          PAGES_GIT_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+          PAGES_WORK="$RUNNER_TEMP/pages-meta" \
+            bash "$GITHUB_WORKSPACE/ctrl/scripts/publish-pages.sh" \
+              "artifacts/meta" "tyfza1/meta"
+
       - name: Ensure Pages serves our indexes
         if: inputs.publish_repo == 'true'
         env:
