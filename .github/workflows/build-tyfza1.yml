@@ -116,19 +116,19 @@ jobs:
             "$TYFZA1_WORK/sources/openwrt" "$TYFZA1_WORK" \
             "$GITHUB_WORKSPACE/ctrl" "$TYFZA1_WORK/artifacts/custom.config"
 
-      - name: Answer kernel symbols unmasked by BTF/FTRACE
-        # 现象：内核 syncconfig 停在
-        #   TYFZA1 USB presence and activity LED (LEDS_TRIGGER_TYFZA1_USB) [N/m/?] (NEW)
-        #   scripts/kconfig/Makefile:85: syncconfig Error 1
-        # 我们打开 DEBUG_INFO/BTF/FTRACE 后，被"解锁"出来的符号在 rtl9617c 的内核种子里
-        # 没有答案；OpenWrt 编内核带 FAIL_ON_UNCONFIGURED=1（include/kernel-build.mk），
-        # syncconfig 见 NEW 直接报错，不会自己取默认值。
+      - name: Reset scan cache after overlay, answer kernel (NEW) symbols
+        # 这一步干两件事：① 铺 overlay 之后把扫描缓存整体作废重扫，WiFi 驱动
+        # kmod-rtl-ax-ap 才会进包元数据（根因见下面长注释）；② 打开 BTF/FTRACE 后
+        # 被"解锁"出来的内核符号在种子里没答案，OpenWrt 带 FAIL_ON_UNCONFIGURED=1
+        # 编内核，syncconfig 见 (NEW) 直接报错，不会自己取默认值，所以逐个补答。
+        # 补答只能写回 overlay 里那份种子：build.sh 会再跑一次 sync-overlay，
+        # 树里那份会被 rsync --delete 原样覆盖回去。
         # 试过 make kernel_oldconfig（入口名在 include/toplevel.mk:193，不是
         # target/linux/oldconfig —— 顶层只有 %:: 兜底，那个字符串会 "No rule to make target"），
         # 但它从**种子**重建 .config（include/target.mk:212），会把我们的 CONFIG_KERNEL_*
         # 覆盖丢掉：结果是 DEBUG_INFO 在、BTF 没了、种子一行没变 —— 白过。
         # 所以这里改成：先让 OpenWrt 自己做一次「种子 + 覆盖」的 configure，在那份 .config
-        # 上补答，再用 kconfig.pl '>' 把差量写回种子。只动 CI 工作树，上游仓库一个字不改。
+        # 上补答，再把被提问过的符号写回种子。只动 CI 工作树，上游仓库一个字不改。
         run: |
           set -euo pipefail
           cd "$TYFZA1_WORK"
@@ -146,14 +146,28 @@ jobs:
           [ -d sources/openwrt/target/linux/rtl9617c ] \
             || { echo "::error::overlay 之后仍然没有 target/linux/rtl9617c"; exit 1; }
           cd sources/openwrt
-          # 扫描缓存必须作废：第 11 步的 stage-honk 在 sync-overlay 之前跑过一次
-          # prepare-tmpinfo，那趟扫描的树里根本没有 target/linux/rtl9617c，而 stamp 比
-          # tmp/.version 新 → 之后 make defconfig 不重扫，KernelPackage/rtl-ax-ap
-          # 全程没进过 tmp/.packageinfo（本轮探针实测 0 处，于是 .config 里那行被丢，
-          # 镜像里就没有 WiFi 驱动）。名字也别赌错：真 stamp 是 .files-packageinfo*。
-          rm -f tmp/.packageinfo tmp/.targetinfo \
-                tmp/info/.files-packageinfo.stamp tmp/info/.files-packageinfo-* \
-                tmp/info/.files-targetinfo.stamp tmp/info/.files-targetinfo-*
+          # —— 根因（这一轮证据闭合，之前两次推断都错在这儿）——
+          # KernelPackage/rtl-ax-ap 不属于 target/linux 那趟扫描。它是被
+          # package/kernel/linux/Makefile 带进包目录列表的：
+          #   15 行 SUBTARGETS = $(notdir $(wildcard target/linux/* target/linux/feeds/*))
+          #   16 行 SUBTARGET_MODULES = …/target/linux/$(t)/modules.mk
+          #   17 行 SCAN_DEPS = modules/*.mk $(TOPDIR)/target/linux/*/modules.mk …
+          #   78 行 -include $(SUBTARGET_MODULES)
+          # 所以 kmod-rtl-ax-ap 只可能出现在 tmp/.packageinfo → tmp/.config-package.in。
+          # .config-target.in 里那 7 处命中全是设备 profile 侧的 DEFAULT_/MODULE_DEFAULT_，
+          # 其中 316250 行 `select PACKAGE_kmod-rtl-ax-ap` 选的是一个当时根本不存在的符号，
+          # kconfig 不会为它建 CONFIG_ 项 → --defconfig 写出来的 .config 里那行必然消失；
+          # 与我们的追加无关（对照 A 上游原文同样丢，就是这个道理）。
+          # 上一轮我 rm 的只有 .packageinfo/.targetinfo 和 .files-* 文件清单戳，
+          # **漏了每个目录各自的 dump 缓存 tmp/info/.packageinfo-<目录>**：第 11 步
+          # stage-honk 为了自检在 sync-overlay 之前扫过一次，那时 target/linux/rtl9617c
+          # 还不存在，package/kernel/linux 那份缓存天生缺 WiFi；rsync -a 保留上游 mtime，
+          # 比缓存还旧 → make 判定"依赖没变" → 拼回去的还是缺 WiFi 的那份。
+          # 要作废就把整份 tmp/info 一起作废，别赌文件名。
+          rm -rf tmp/info \
+                 tmp/.packageinfo tmp/.targetinfo \
+                 tmp/.config-package.in tmp/.config-target.in \
+                 tmp/.packagedeps tmp/.packageauxvars tmp/.packageusergroup
           # 扫描失败默认是看不见的：scan.mk 用 `make -r DUMP=1 … 2>/dev/null || { 把原因
           # 写进 logs/<目录>/dump.txt 后删掉产物 }`。所以只报"缺不缺"定不了位，
           # 这里显式带 V=s 重扫一次，并把四份索引和 dump 一起打出来。
@@ -164,25 +178,29 @@ jobs:
           #      grep 中时 grep 返回 1，pipefail + set -e 直接把整个步骤弄红，
           #      证据反而没拿到。现在每条诊断都自带 `|| true`，且函数以 return 0 收尾。
           wifi_diag() {
-            local f n c ln
+            local f n c ln IN
             for f in tmp/.packageinfo tmp/.targetinfo tmp/.config-package.in tmp/.config-target.in; do
               if [ -f "$f" ]; then n=$(wc -l < "$f"); c=$(grep -c 'rtl-ax-ap' "$f" || true); else n='-'; c='-'; fi
               printf '  %-24s 行数=%-7s rtl-ax-ap 命中=%s\n' "$f" "$n" "$c"
             done
             echo "  [$1] .config 里相关行：$( { grep -E '^#? *CONFIG_(PACKAGE_)?(kmod-rtl-ax-ap|TARGET_rtl9617c).*' .config || true; } | tr '\n' ' ' )"
-            echo "  [$1] tmp/.targetinfo 里的条目原文（Depends: 就在这份文件里）："
+            echo "  [$1] tmp/.packageinfo 里的条目原文（Depends: 就在这儿）："
             awk '/^Package: kmod-rtl-ax-ap$/{f=1} f{print "    " $0} f&&/^Package: /&&!/kmod-rtl-ax-ap/{exit}' \
-              tmp/.targetinfo 2>/dev/null | head -22 || true
-            echo "  [$1] tmp/.config-target.in 的 kconfig 条目（含外层 if/menu）："
-            ln=$(awk '/^[[:space:]]*config PACKAGE_kmod-rtl-ax-ap$/{print NR; exit}' tmp/.config-target.in 2>/dev/null || true)
-            if [ -n "${ln:-}" ]; then
-              sed -n "$((ln>16 ? ln-16 : 1)),$((ln+22))p" tmp/.config-target.in
-            else
-              echo '    （没有 config PACKAGE_kmod-rtl-ax-ap 这一行 → 条目名和预期不同，下面把命中行全打出来）'
-              grep -n 'rtl-ax-ap' tmp/.config-target.in 2>/dev/null | head -10 || true
-            fi
+              tmp/.packageinfo 2>/dev/null | head -16 || true
+            echo "  [$1] kconfig 条目（含外层 if/menu；两份索引分别找）："
+            for IN in tmp/.config-package.in tmp/.config-target.in; do
+              [ -f "$IN" ] || continue
+              ln=$(awk '/^[[:space:]]*config PACKAGE_kmod-rtl-ax-ap$/{print NR; exit}' "$IN" 2>/dev/null || true)
+              if [ -n "${ln:-}" ]; then
+                echo "    == 条目在 $IN 第 $ln 行 =="
+                sed -n "$((ln>10 ? ln-10 : 1)),$((ln+18))p" "$IN"
+              else
+                echo "    == $IN 里没有 config PACKAGE_kmod-rtl-ax-ap =="
+              fi
+            done
             echo "  [$1] 条目引用的 depends/select 符号 → 在 kconfig 里定义了吗 / 当前 .config 的值："
-            { awk '/^[[:space:]]*config PACKAGE_kmod-rtl-ax-ap$/{f=1;next} f&&/^[[:space:]]*(depends on|select)/{print} f&&/^[[:space:]]*help$/{exit}' tmp/.config-target.in 2>/dev/null \
+            { awk 'FNR==1{f=0} /^[[:space:]]*config PACKAGE_kmod-rtl-ax-ap$/{f=1;next} f&&/^[[:space:]]*(depends on|select)/{print} f&&/^[[:space:]]*help$/{exit}' \
+                  tmp/.config-package.in tmp/.config-target.in 2>/dev/null \
                 | sed -E 's/^[[:space:]]*(depends on|select)[[:space:]]+//; s/[()&|!]+/ /g' | tr -s ' \t' '\n' \
                 | grep -E '^[A-Za-z_][A-Za-z0-9_-]*$' | sort -u || true; } \
               | while read -r sym; do
@@ -194,9 +212,23 @@ jobs:
             return 0
           }
           make -s prepare-tmpinfo V=s > "$TYFZA1_WORK/tmpinfo.log" 2>&1 || echo "::warning::prepare-tmpinfo 非 0 退出，看下面的扫描诊断"
-          echo "=== 包扫描诊断 ==="; wifi_diag "扫描后"
+          echo "=== 包扫描诊断（整份 tmp/info 作废后重扫）==="; wifi_diag "扫描后"
           echo "--- tmpinfo.log 里的错误行 ---"; grep -inE "error|failed|nothing to be done" "$TYFZA1_WORK/tmpinfo.log" | head -12 || true
           if [ -d logs ]; then find logs -name 'dump.txt' 2>/dev/null | head -5 | while read -r d; do echo "== $d"; tail -15 "$d"; done; fi
+          # 硬断言：作废全部扫描缓存后重扫，WiFi 驱动必须进包元数据。缺了就是
+          # dump 这一步真出错（scan.mk 会把原因塞进 logs/<目录>/dump.txt 并删产物），
+          # 后面 defconfig 必然把它丢，编 40 分钟也只是再产一个没 WiFi 的镜像。
+          PKHIT=$( { grep -c '^Package: kmod-rtl-ax-ap$' tmp/.packageinfo 2>/dev/null || true; } )
+          INHIT=$( { grep -hc 'config PACKAGE_kmod-rtl-ax-ap' tmp/.config-package.in tmp/.config-target.in 2>/dev/null || true; } \
+                   | awk '{s+=$1} END{print s+0}')
+          echo "重扫结果：.packageinfo 条目=$PKHIT  kconfig 条目=$INHIT"
+          if [ "${PKHIT:-0}" = "0" ] || [ "${INHIT:-0}" = "0" ]; then
+            echo "::error::重扫后 kmod-rtl-ax-ap 还是没进包元数据 → 不是缓存问题，是 package/kernel/linux 的 dump 出错"
+            for d in logs/package/kernel_linux/dump.txt logs/package/kernel/linux/dump.txt; do
+              { [ -s "$d" ] && { echo "== $d"; tail -30 "$d"; }; } || true
+            done
+            exit 1
+          fi
           # tools/install 之前必须先 defconfig：否则 toplevel.mk 把 .config 当过期目标，
           # 转手调 menuconfig，CI 无终端 → "Error opening terminal: unknown"。
           make defconfig </dev/null > "$TYFZA1_WORK/defconfig.log" 2>&1 || {
@@ -231,35 +263,14 @@ jobs:
             return 0
           }
           BASECFG="$TYFZA1_WORK/port/configs/tyfza1-boot.config"
-          awk '/追加：/{f=1; next} f' "$TYFZA1_CONFIG" > "$TYFZA1_WORK/our-block.conf"
-          { cat "$BASECFG" 2>/dev/null; echo; grep -E '^#? *CONFIG_KERNEL_' "$TYFZA1_WORK/our-block.conf" 2>/dev/null || true; } > "$TYFZA1_WORK/cfg-kernel.conf"
-          { cat "$BASECFG" 2>/dev/null; echo; grep -E '^#? *CONFIG_(PACKAGE_|LUCI_)' "$TYFZA1_WORK/our-block.conf" 2>/dev/null || true; } > "$TYFZA1_WORK/cfg-pkg.conf"
-          echo "=== 对照实验（A 上游原文 / B 只加内核段 / C 只加包段 / D 线上派生）==="
+          echo "=== 对照（根因已定位，这两组只当护栏）：A 上游原文 / D 线上派生 ==="
           PURE_KMOD=0; DERIVED_KMOD=0
           if [ -s "$BASECFG" ]; then
             ctrl A_pure "$BASECFG"; PURE_KMOD=$R_KMOD
-            ctrl B_kernel "$TYFZA1_WORK/cfg-kernel.conf"
-            ctrl C_pkg "$TYFZA1_WORK/cfg-pkg.conf"
           else
-            echo "::warning::找不到上游底配置 $BASECFG，跳过 A/B/C，只跑 D"
+            echo "::warning::找不到上游底配置 $BASECFG，跳过 A"
           fi
           ctrl D_derived "$TYFZA1_CONFIG"; DERIVED_KMOD=$R_KMOD
-          # E：把 package/custom 整个挪走再扫一次。scan.mk 对单个包 dump 失败是
-          # "写进 logs/<目录>/dump.txt 然后删产物"，即静默少一批包；如果我们的包
-          # 把扫描搞断了，目标侧的 kmod 也可能一起没了。只在 D 也没 WiFi 时才试，
-          # 省两分钟。做完必须放回去并重扫，否则后面的步骤用的还是残缺索引。
-          if [ "${DERIVED_KMOD:-0}" = "0" ]; then
-            echo "=== E：package/custom 挪走后的对照 ==="
-            if [ -d package/custom ]; then
-              mv package/custom "$TYFZA1_WORK/custom.off"
-              make -s prepare-tmpinfo V=s > "$TYFZA1_WORK/tmpinfo-E.log" 2>&1 || true
-            fi
-            ctrl E_nocustom "$TYFZA1_CONFIG"
-            if [ -d "$TYFZA1_WORK/custom.off" ]; then
-              mv "$TYFZA1_WORK/custom.off" package/custom
-              make -s prepare-tmpinfo V=s > "$TYFZA1_WORK/tmpinfo-E2.log" 2>&1 || true
-            fi
-          fi
           # WiFi 驱动 kmod-rtl-ax-ap 定义在 target/linux/rtl9617c/modules.mk 里
           # （KernelPackage，里面装着 cfg80211/mac80211/rtl_ax_ap 三个 .ko）。
           # 这类包能不能被选中要看两件事：包扫描有没有看到那个目录、以及可用性判定
@@ -281,43 +292,15 @@ jobs:
             return 0
           }
           wifi_probe "第 1 次 defconfig 后"
-          # —— 按对照结果分三条路，全在这一轮里落地，不再"猜一轮编 40 分钟" ——
-          # 1) D 有 WiFi → CONFIG_KERNEL_* 覆盖是清白的，什么都不改，继续原计划。
-          # 2) A 有、D 没有 → 是我们那几行 CONFIG_KERNEL_* 触发的。内核选项改走
-          #    overlay 里那份 target 种子（下面 (NEW) 补答循环写的是同一份文件），
-          #    custom.config 只留包段。种子才是这个 target 设内核选项的正道。
-          # 3) A 也没有 → defconfig 在这棵树上本来就留不住它，跟我们的追加无关；
-          #    再编 40 分钟只会多出一个没 WiFi 的镜像，现在就红，证据已在上面。
-          KERNEL_VIA_SEED=0
-          if [ "${DERIVED_KMOD:-0}" = "0" ] && [ "${PURE_KMOD:-0}" = "1" ]; then
-            echo "=== 切换：内核选项改由 overlay 种子承载，custom.config 去掉 CONFIG_KERNEL_* ==="
-            SEED=$(find target/linux/rtl9617c -maxdepth 2 -type f -name 'config-*' | head -1)
-            [ -n "$SEED" ] || { echo "::error::切换失败：找不到 rtl9617c 的内核种子"; exit 1; }
-            OVL="$TYFZA1_WORK/port/overlay/target/linux/rtl9617c/$(basename "$SEED")"
-            [ -s "$OVL" ] || { echo "::error::切换失败：overlay 里没有 $(basename "$SEED")（$OVL）"; exit 1; }
-            { echo ''
-              echo '# ponwrt：BTF/eBPF/FTRACE 走种子 —— CONFIG_KERNEL_* 覆盖会让 kmod-rtl-ax-ap 掉出 .config'
-              grep -E '^#? *CONFIG_KERNEL_' "$TYFZA1_WORK/our-block.conf" \
-                | sed -E 's/^# ?CONFIG_KERNEL_/# CONFIG_/; s/^CONFIG_KERNEL_/CONFIG_/'
-            } >> "$OVL"
-            cp -f "$OVL" "$SEED"          # 树里那份同步（build.sh 再跑 sync-overlay 也是这个内容）
-            cp "$TYFZA1_WORK/cfg-pkg.conf" "$TYFZA1_CONFIG"
-            make defconfig </dev/null > "$TYFZA1_WORK/defconfig-switch.log" 2>&1 || {
-              echo "::error::切换后 defconfig 失败"; tail -40 "$TYFZA1_WORK/defconfig-switch.log"; exit 1; }
-            wifi_diag "切换到种子后"
-            KERNEL_VIA_SEED=1
-          fi
-          if [ "${DERIVED_KMOD:-0}" = "0" ] && [ "${PURE_KMOD:-0}" = "0" ] && [ "$KERNEL_VIA_SEED" = "0" ]; then
-            echo "::error::上游原文 config（A）在这棵树也留不住 kmod-rtl-ax-ap → 不是我们追加造成的"
-            echo "::error::本轮不再花时间编镜像；看 .targetinfo 条目、.config-target.in 条目、depends 的定义处与取值"
+          # 当场把关，不留到 40 分钟后：符号已经存在（上面的硬断言）、上游原文也丢，
+          # 说明还有别的机制在丢它，那时候需要的同样是条目原文，而不是一个镜像。
+          if [ "${DERIVED_KMOD:-0}" = "0" ] || [ "${PURE_KMOD:-0}" = "0" ]; then
+            echo "::error::扫描已包含 kmod-rtl-ax-ap，但 defconfig 仍把它丢了（A=$PURE_KMOD D=$DERIVED_KMOD）"
+            echo "::error::看上面 depends/select 符号的「定义处」与取值，以及 .packageinfo 条目里的 Depends:"
             exit 1
           fi
-          if [ "$KERNEL_VIA_SEED" = "0" ]; then
-            grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config \
-              || { echo "::error::defconfig 把 BTF 丢了（片段没生效？）"; exit 1; }
-          else
-            echo "（种子路线：BTF 不再体现为 .config 里的 CONFIG_KERNEL_*，改由后面内核 \$KC 断言把关）"
-          fi
+          grep -qx 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config \
+            || { echo "::error::defconfig 把 BTF 丢了（片段没生效？）"; exit 1; }
           # 机型必须是我们那台，不然 oldconfig 答的是别的 target。
           # 用他们 boot config 里就有的符号（archived config.buildinfo 里没有
           # CONFIG_TARGET_BOARD 这种内部符号，拿它断言会假失败）。
