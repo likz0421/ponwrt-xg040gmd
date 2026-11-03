@@ -779,6 +779,10 @@ jobs:
         run: |
           set -euo pipefail
           cd "$TYFZA1_WORK"
+          # Pages 的地址是 <owner>.github.io/<repo>/…，而 GITHUB_REPOSITORY 本身是
+          # "owner/repo"，直接拼会把 owner 写两遍（CI 实测就踩过：指出来的
+          # apk_target_index 是 404）。只取斜杠后面那一段。
+          PAGES_REPO="${GITHUB_REPOSITORY#*/}"
           bash "$GITHUB_WORKSPACE/ctrl/scripts/make-latest.sh" "$PWD/artifacts/meta" \
             device=tyfza1 \
             target=rtl9617c/generic \
@@ -794,7 +798,7 @@ jobs:
             release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/tyfza1-plus" \
             firmware_url="https://github.com/$GITHUB_REPOSITORY/releases/download/tyfza1-plus/$IMG_NAME" \
             sha256sums_url="https://github.com/$GITHUB_REPOSITORY/releases/download/tyfza1-plus/SHA256SUMS" \
-            apk_target_index="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY}/tyfza1/targets/rtl9617c/generic/packages/packages.adb" \
+            apk_target_index="https://${GITHUB_REPOSITORY_OWNER}.github.io/${PAGES_REPO}/tyfza1/targets/rtl9617c/generic/packages/packages.adb" \
             wifi_driver=kmod-rtl-ax-ap \
             upstream_sha="$TYFZA1_SHA" \
             notes="判断新旧只看 sha256 与 built_at_local；滚动 tag 不改 published_at"

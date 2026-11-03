@@ -596,6 +596,9 @@ jobs:
         run: |
           set -euo pipefail
           cd "$WORK/openwrt"
+          # Pages 地址是 <owner>.github.io/<repo>/…，GITHUB_REPOSITORY 是 "owner/repo"，
+          # 直接拼会把 owner 写两遍（CI 实测踩过，指出去的 apk_target_index 变 404）
+          PAGES_REPO="${GITHUB_REPOSITORY#*/}"
           bash "$GITHUB_WORKSPACE/ctrl/scripts/make-latest.sh" "$WORK/meta" \
             device=xg040gmd \
             target=airoha/an7581 \
@@ -611,7 +614,7 @@ jobs:
             release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/stable-xg040gmd" \
             firmware_url="https://github.com/$GITHUB_REPOSITORY/releases/download/stable-xg040gmd/$FIRMWARE_NAME" \
             sha256sums_url="https://github.com/$GITHUB_REPOSITORY/releases/download/stable-xg040gmd/sha256sums" \
-            apk_target_index="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY}/targets/airoha/an7581/packages/packages.adb" \
+            apk_target_index="https://${GITHUB_REPOSITORY_OWNER}.github.io/${PAGES_REPO}/targets/airoha/an7581/packages/packages.adb" \
             wifi_driver=kmod-mt76-connac \
             source_sha="$SOURCE_SHA" \
             notes="另有 -ubi-usb-sfp 与两个 recovery 变体，全清单见 sha256sums_url；判断新旧只看 sha256 与 built_at_local"

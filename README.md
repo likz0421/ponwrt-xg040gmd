@@ -24,7 +24,14 @@ https://likz0421.github.io/ponwrt-xg040gmd/tyfza1/meta/latest.json   # TYFZA1
 | 设备 | 当前版本 | 固件 | sha256（前 12 位） |
 |---|---|---|---|
 | XG-040G-MD | 2026-11-03 15:02 UTC+8 · run 41580002244 | `…-ubi-squashfs-sysupgrade.itb` 32,031,021 B | `556e9d6cf920` |
-| TYFZA1 | 2026-11-03 22:16 UTC+8 · run 41642698943 | `sysupgrade.bin` 29,542,714 B | `394c47637f4b` |
+| TYFZA1 | 2026-11-04 03:00 UTC+8 · run 41686969702 | `sysupgrade.bin` 29,542,714 B | `2eaeb8cb91c2` |
+
+表里的数字是**快照**，每轮构建都会变，真值只认上面那两个 JSON。另外 TYFZA1 这条线目前
+**不是**逐字节可复现：两轮配置完全相同、字节数也一样（29,542,714 B），但内容哈希不同
+（`394c4763…` → `2eaeb8cb…`），说明镜像里嵌了随时间变的东西（内核 UTS 构建时间戳、
+squashfs/FIT 的时间戳这一类，具体哪一处还没逐层比对过）。XG 那条线此前实测两轮 sha256
+完全一致。想用哈希判断"配置有没有变"，TYFZA1 需要先把时间源钉住（`SOURCE_DATE_EPOCH`），
+否则请比 `latest.json` 里的 `run_id` 与 `built_at_local`。
 
 设备上更新走内置的自建源：`apk update && apk upgrade`（源列表就是上面 `apk_target_index` 那套）。
 电脑上只想确认下载到的固件是不是最新一轮：比对 `latest.json` 的 `sha256` 与本地 `sha256sum` 输出即可。

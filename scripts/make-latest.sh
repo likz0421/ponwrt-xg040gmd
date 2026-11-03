@@ -40,6 +40,14 @@ if (!o.sha256 || !o.firmware_url) {
   console.error("::error::latest.json 至少要含 sha256 与 firmware_url，否则判断不了新旧");
   process.exit(1);
 }
+// Pages 地址必须是 <owner>.github.io/<repo>/…；GITHUB_REPOSITORY 本身含 "owner/"，
+// 拼错就会把 owner 写两遍，指出去是个 404。CI 真踩过，所以在产出前就地拦下。
+for (const [k, v] of Object.entries(o)) {
+  if (typeof v === "string" && /([A-Za-z0-9._-]+)\.github\.io\/\1\//.test(v)) {
+    console.error(`::error::${k} 的 Pages 地址把 owner 写重了：${v}`);
+    process.exit(1);
+  }
+}
 fs.writeFileSync(process.env.OUTFILE, JSON.stringify(o, null, 2) + "\n");
 console.log("latest.json：" + Object.keys(o).length + " 个字段 · " + o.firmware + " " + (o.size_bytes || "?") + " B · sha256 " + String(o.sha256).slice(0, 12) + "…");
 ' OUTFILE="$OUT/latest.json"
