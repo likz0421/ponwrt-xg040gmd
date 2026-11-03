@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at_utc": "2026-11-03T19:01:25Z",
+  "generated_at_utc": "2026-11-03T19:06:40Z",
   "device": "tyfza1",
   "target": "rtl9617c/generic",
   "profile": "tianyi_tyfza1",
@@ -15,7 +15,7 @@
   "release_url": "https://github.com/likz0421/ponwrt-xg040gmd/releases/tag/tyfza1-plus",
   "firmware_url": "https://github.com/likz0421/ponwrt-xg040gmd/releases/download/tyfza1-plus/sysupgrade.bin",
   "sha256sums_url": "https://github.com/likz0421/ponwrt-xg040gmd/releases/download/tyfza1-plus/SHA256SUMS",
-  "apk_target_index": "https://likz0421.github.io/likz0421/ponwrt-xg040gmd/tyfza1/targets/rtl9617c/generic/packages/packages.adb",
+  "apk_target_index": "https://likz0421.github.io/ponwrt-xg040gmd/tyfza1/targets/rtl9617c/generic/packages/packages.adb",
   "wifi_driver": "kmod-rtl-ax-ap",
   "upstream_sha": "82327574f70cce9a626dc0d973b8cc5063af5132",
   "notes": "判断新旧只看 sha256 与 built_at_local；滚动 tag 不改 published_at"
