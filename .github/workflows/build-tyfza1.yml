@@ -163,6 +163,16 @@ jobs:
               if [ -f "$f" ]; then n=$(wc -l < "$f"); c=$(grep -c 'rtl-ax-ap' "$f" || true); else n='-'; c='-'; fi
               printf '  %-24s 行数=%-7s rtl-ax-ap 命中=%s\n' "$f" "$n" "$c"
             done
+            # 符号在 .config-target.in 里，却没进 .config → 只剩一种可能：depends 不成立。
+            # 把整个条目打出来，卡在哪一条 depends 直接看，别再靠猜。
+            echo "  --- kmod-rtl-ax-ap 的 kconfig 条目（depends 就在这儿）---"
+            awk '/^config PACKAGE_kmod-rtl-ax-ap$/{f=1} f{print "    " $0} f&&/^config /&&!/kmod-rtl-ax-ap/{exit}' tmp/.config-target.in 2>/dev/null | head -20 || true
+            echo "  --- 条目里 depends 引用的符号在当前 .config 中的值 ---"
+            awk '/^config PACKAGE_kmod-rtl-ax-ap$/{f=1;next} f&&/^\tdepends on/{print} f&&/^$/{exit}' tmp/.config-target.in 2>/dev/null \
+              | sed -E 's/^\tdepends on //; s/[()&|]+/ /g; s/\s+/ /g' | tr ' ' '\n' \
+              | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | sort -u | while read -r sym; do
+                  printf '    %-28s = %s\n' "$sym" "$(grep -m1 -E "^CONFIG_$sym=|^# CONFIG_$sym is not set" .config 2>/dev/null || echo '（.config 里没有）')"
+                done
             return 0
           }
           make -s prepare-tmpinfo V=s > "$TYFZA1_WORK/tmpinfo.log" 2>&1 || echo "::warning::prepare-tmpinfo 非 0 退出，看下面的扫描诊断"
