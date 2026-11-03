@@ -679,9 +679,13 @@ jobs:
               echo "::warning::out/ 里没找到 sysupgrade 固件，正文这轮不带 sha256 行"
             fi
           fi
-          REL="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/stable-xg040gmd"
+          REL_API="https://api.github.com/repos/$GITHUB_REPOSITORY/releases"
           curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-            -o /tmp/rel.json "$REL"
+            -o /tmp/rel.json "$REL_API/tags/stable-xg040gmd"
+          # PATCH 只认 /releases/{id}：对 /releases/tags/{tag} 发 PATCH 会 404
+          #（GET 支持 tags 路径，PATCH 不支持），这一步第一次真跑就是死在这儿。
+          REL_ID=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/rel.json","utf8")).id)')
+          [ -n "$REL_ID" ] || { echo "::error::读不到 release id"; head -c 300 /tmp/rel.json; exit 1; }
           # 原有那份说明（基座 SHA、profile、备份提醒）保留，只剥掉上一轮的同名段，
           # 免得每构建一次就叠一段。
           node -e '
@@ -709,9 +713,9 @@ jobs:
           '
           code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
             -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" --data-binary @/tmp/patch.json "$REL")
+            -H "Content-Type: application/json" --data-binary @/tmp/patch.json "$REL_API/$REL_ID")
           [ "$code" = "200" ] || { echo "::error::PATCH release 失败 HTTP $code"; exit 1; }
-          curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$REL" \
+          curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$REL_API/$REL_ID" \
             | grep -q "run $GITHUB_RUN_ID" \
             || { echo "::error::正文里没有本轮 run $GITHUB_RUN_ID"; exit 1; }
           echo "✅ Release 已带本轮戳：run $GITHUB_RUN_ID · $BUILD_STAMP"
