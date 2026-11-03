@@ -527,7 +527,7 @@ jobs:
           tag_name: stable-xg040gmd
           name: 'XG-040G-MD 稳定版构建'
           body: |
-            ## 本次构建
+            ## 构建参数
             | 项 | 值 |
             |---|---|
             | 基座 | `pbs05/ponwrt@${{ env.SOURCE_SHA }}` |
@@ -589,6 +589,69 @@ jobs:
           exit 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 滚动 tag 不改 published_at、资产又是同名覆盖重建，Release 页面"看着像没新产物"
+      # （用户两次都被这儿绕住）。这一步自己算出时间戳与固件 sha256，拼成本轮说明贴回
+      # 标题和正文头，再读回来验一次 —— 不假设 action 一定改了正文。
+      - name: Restamp the release title and body with this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_STAMP: ${{ env.BUILD_STAMP }}
+          FIRMWARE_SHA256: ${{ env.FIRMWARE_SHA256 }}
+          FIRMWARE_SIZE: ${{ env.FIRMWARE_SIZE }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ -n "${BUILD_STAMP:-}" ] || BUILD_STAMP=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M')
+          export BUILD_STAMP
+          # 前面步骤没算过固件指纹，就在这儿从 out/ 里取（缺了也只是正文少一行 sha256，
+          # 不影响发布本身）。
+          if [ -z "${FIRMWARE_SHA256:-}" ]; then
+            FW=$(ls "$GITHUB_WORKSPACE"/out/*squashfs-sysupgrade.itb 2>/dev/null | head -1 || true)
+            if [ -n "${FW:-}" ]; then
+              export FIRMWARE_SHA256=$(sha256sum "$FW" | cut -d' ' -f1)
+              export FIRMWARE_SIZE=$(stat -c %s "$FW")
+              echo "本轮固件：$(basename "$FW") $FIRMWARE_SIZE B · sha256 $FIRMWARE_SHA256"
+            else
+              echo "::warning::out/ 里没找到 sysupgrade 固件，正文这轮不带 sha256 行"
+            fi
+          fi
+          REL="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/stable-xg040gmd"
+          curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            -o /tmp/rel.json "$REL"
+          # 原有那份说明（基座 SHA、profile、备份提醒）保留，只剥掉上一轮的同名段，
+          # 免得每构建一次就叠一段。
+          node -e '
+            const fs = require("fs");
+            const d = JSON.parse(fs.readFileSync("/tmp/rel.json", "utf8"));
+            let old = d.body || "";
+            const c = old.indexOf("## 本次构建（run ");
+            if (c >= 0) {
+              const n = old.indexOf("\n\n", c);
+              // 剥不到段尾就只保留段前那部分，别把整篇正文吞掉
+              old = n >= 0 ? old.slice(n + 2) : old.slice(0, c);
+            }
+            const E = process.env, stamp = E.BUILD_STAMP || "";
+            const lines = [
+              "## 本次构建（run " + E.GITHUB_RUN_ID + "）",
+              "- 时间：" + stamp + "｜认新旧看这一行和下面的 sha256：滚动 tag 不改 published_at，" +
+              "资产又是同名覆盖重建，所以卡片日期看着像旧的。",
+              E.FIRMWARE_SHA256 ? "- 固件 sha256 `" + E.FIRMWARE_SHA256 + "`（" + (E.FIRMWARE_SIZE || "?") + " B）" : null,
+              "- 运行：<" + E.RUN_URL + ">",
+            ].filter((x) => x !== null).join("\n");
+            fs.writeFileSync("/tmp/patch.json", JSON.stringify({
+              name: "XG-040G-MD 稳定版构建 · 构建 " + stamp,
+              body: lines + "\n\n" + old,
+            }));
+          '
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" --data-binary @/tmp/patch.json "$REL")
+          [ "$code" = "200" ] || { echo "::error::PATCH release 失败 HTTP $code"; exit 1; }
+          curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$REL" \
+            | grep -q "run $GITHUB_RUN_ID" \
+            || { echo "::error::正文里没有本轮 run $GITHUB_RUN_ID"; exit 1; }
+          echo "✅ Release 已带本轮戳：run $GITHUB_RUN_ID · $BUILD_STAMP"
 
       - name: Summary
         if: always()

@@ -704,12 +704,39 @@ jobs:
           ls -la artifacts/release
           (cd artifacts/release && sha256sum * 2>/dev/null | tee SHA256SUMS.local)
 
+      - name: Build stamp for the release text
+        # 滚动 tag 的 published_at 永远停在首次发布那一刻，资产又是同名覆盖重建，
+        # 所以 Release 页面"看着像没新产物"（用户两次都被这里绕住）。把时间/run/sha256
+        # 写进标题和正文头，新旧一眼就能认。时区不依赖 tzdata：UTC 加 8 小时。
+        run: |
+          set -euo pipefail
+          cd "$TYFZA1_WORK/artifacts/release"
+          IMG=sysupgrade.bin
+          [ -s "$IMG" ] || { echo "::error::release 目录里没有 $IMG"; ls -l; exit 1; }
+          SZ=$(stat -c %s "$IMG")
+          SH=$(sha256sum "$IMG" | cut -d' ' -f1)
+          {
+            echo "IMG_NAME=$IMG"
+            echo "IMG_SIZE=$SZ"
+            echo "IMG_SHA=$SH"
+            echo "BUILD_STAMP=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M') UTC+8"
+          } >> "$GITHUB_ENV"
+          echo "本轮产物：$IMG  $SZ 字节  sha256 $SH"
+
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: tyfza1-plus
-          name: 'TYFZA1 (RTL9617C) 上游 + BTF/honk/Lucent 主题'
+          name: 'TYFZA1 (RTL9617C) 上游 + BTF/honk/Lucent · 构建 ${{ env.BUILD_STAMP }}'
           body: |
+            ## 本次构建（run ${{ github.run_id }}）
+            - 时间：${{ env.BUILD_STAMP }}
+            - `${{ env.IMG_NAME }}`：**${{ env.IMG_SIZE }} B**，sha256 `${{ env.IMG_SHA }}`
+            - WiFi 驱动：`/lib/modules/6.18.55/rtl_ax_ap.ko`（kmod-rtl-ax-ap 内含
+              cfg80211/mac80211/rtl_ax_ap 三个 .ko）必须在镜像里，成品断言会验。
+            - 下面的资产每次构建都**同名覆盖重建**；滚动 tag 不改 published_at，
+              所以卡片日期看着像旧的 —— 认新旧看这里的构建时间和 sha256。
+
             基座完全按上游：<https://github.com/LeoooChen/PonWRT-TYFZA1@${{ env.TYFZA1_SHA }}>
             （按 SHA 取，非 fork；其 sources.lock.json 锁的 openwrt commit + kernel 6.18.55）。
             只额外加三样，且不改上游任何文件（用他们自己留的 TYFZA1_CONFIG 扩展点派生 config）：
@@ -770,6 +797,23 @@ jobs:
           done
           echo "::error::Pages 站点在，但 TYFZA1 的索引下不到（$url）"
           exit 1
+
+      # 放在最后一步之前：它只管"发布页认得出新旧"，不该有挡住固件与索引下发的能力
+      # （Publish to Release / Pages 这两步在它前面已经跑完了）。
+      - name: Verify the release text carries this build
+        # 不假设 action 一定改了标题/正文：读回来验，缺了就红。
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          j=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/tyfza1-plus")
+          printf '%s' "$j" | grep -q "$IMG_SHA" \
+            || { echo "::error::Release 正文里没有本轮 sha256（$IMG_SHA）→ 正文没被更新"; exit 1; }
+          printf '%s' "$j" | grep -q "run $GITHUB_RUN_ID" \
+            || { echo "::error::Release 正文不是本轮 run $GITHUB_RUN_ID"; exit 1; }
+          echo "✅ Release 已带本轮戳：run $GITHUB_RUN_ID · ${IMG_SIZE} B · sha256 ${IMG_SHA:0:12}…"
 
       - name: Summary
         if: always()
