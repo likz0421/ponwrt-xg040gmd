@@ -612,8 +612,10 @@ jobs:
             [ -n "$v" ] && { HV="$v"; break; }
           done
           WANT=$(sed -n 's/^HONK_PKG_VERSION=//p' "$GITHUB_WORKSPACE/ctrl/honk-manifest.txt")
+          # apk 库里的 V: 是「版本-revision」（实测 0.1.0_beta5-r1），等比 manifest 的
+          # HONK_PKG_VERSION（0.1.0_beta5）会假失败 —— 只比 -r 之前那段。
           echo "  镜像里的 honk 版本 = ${HV:-（读不到）}，manifest 钉的是 $WANT"
-          [ "$HV" = "$WANT" ] || { echo "::error::镜像里的 honk 不是 manifest 钉的那版"; exit 1; }
+          [ "${HV%%-r*}" = "$WANT" ] || { echo "::error::镜像里的 honk 不是 manifest 钉的那版"; exit 1; }
           # 主题的静态资源：3.10.9 起 Makefile 会写 root/usr/share/lucent/version，
           # 内容就是 PKG_VERSION-rPKG_RELEASE —— 有它才算资源真的铺进去了。
           # 上一版这里只按 htdocs/luci-static 找 *lucent* 目录就 warn，路径本身就是错的
