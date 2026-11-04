@@ -652,7 +652,7 @@ jobs:
             fi
           done
           for r in $ROOTS; do
-            [ -f "$r/etc/apk/arch" ] && { echo "-- apk 架构声明 --"; sed 's/^/    /' "$r/etc/apk/arch"; break; }
+            { [ -f "$r/etc/apk/arch" ] && { echo "-- apk 架构声明 --"; sed 's/^/    /' "$r/etc/apk/arch"; break; }; } || true
           done
 
       # 上一条只判"包在不在镜像里"，没判源文件和公钥有没有落进 rootfs。
