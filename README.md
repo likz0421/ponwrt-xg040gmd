@@ -1,5 +1,9 @@
 # XG-040G-MD 稳定版构建（Airoha AN7581 / PonWrt）
 
+> **本仓库只构建 XG-040G-MD。** 天翼 TYFZA1（RTL9617C）的构建已全部迁到
+> [`likz0421/tyfza1-openwrt`](https://github.com/likz0421/tyfza1-openwrt)，
+> 历史遗留的 `build-tyfza1.yml` 已从本仓库删除，不要再在这里触发任何 TYFZA1 构建。
+
 自己的构建仓库，不是任何人的 fork。只按固定 commit 拉上游源码，
 配置 = **上游原样 + 16 个符号的差异**，其余一律继承上游默认值。
 
