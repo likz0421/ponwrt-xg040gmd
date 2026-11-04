@@ -13,23 +13,26 @@
 #     作为普通 LuCI 包编进来。
 # 结果：honk 是固件里的正常包，进 apk 数据库、可 apk upgrade、依赖齐全。
 
-HONK_VERSION=0.1.0-beta.4
+HONK_VERSION=0.1.0-beta.5
 # apk 的版本号里 `-` 是 revision 分隔符，整个字符串只允许出现一次：
 # 0.1.0-beta.4-r1 会被 `apk mkpkg` 直接拒掉（"package version is invalid"，上一轮就是这）。
 # 写成下划线形式，并且和 daeuniverse 自己 Makefile 里的 PKG_VERSION 一字不差
-# （`PKG_VERSION:=$(if $(HONK_VERSION),$(HONK_VERSION),0.1.0_beta4)`），
+# （feed main 现为 `PKG_VERSION:=$(if $(HONK_VERSION),$(HONK_VERSION),0.1.0_beta5)`），
 # 这样将来从 @daeuniverse 装同名包时，版本比较不会因为我们这边排得更高而拒绝"降级"。
-HONK_PKG_VERSION=0.1.0_beta4
-HONK_ASSET=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
-HONK_URL=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.4/honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz
-# 与 release 附带的 SHA256SUMS 逐字核对过（不是只信我自己下载后算的那次）
-HONK_SHA256=121c94f3a30091c5550ae503ddf7bce118def08ddc301a7f8ffa740f956476d0
-# 资产内的文件名（静态链接 ELF，30.7MB）
+HONK_PKG_VERSION=0.1.0_beta5
+HONK_ASSET=honk-core-v0.1.0-beta.5-aarch64-unknown-linux-musl-full.tar.gz
+HONK_URL=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.5/honk-core-v0.1.0-beta.5-aarch64-unknown-linux-musl-full.tar.gz
+# 与 release 附带的 SHA256SUMS 逐字核对过（v0.1.0-beta.5 那行 6e06b12c…，
+# 与 GitHub release API 的 asset digest 也是同一串）
+HONK_SHA256=6e06b12c05f775744b4cc65f80d29ae486e65f4a433d2878b197703d8f83e7ae
+# 资产内的文件名（静态链接 ELF）
 HONK_FILE=honk-core
 
 # 三个包的来源：daeuniverse/openwrt-packages（feed 形态，源码），锁 SHA
 DAEUNIV_URL=https://github.com/daeuniverse/openwrt-packages
-DAEUNIV_SHA=503cdb131c43f727ae0125cfd86ca0f826eef44f
+# e48b222f = 上游 "build(honk): move to v0.1.0-beta.5"，与上面的二进制版本对齐；
+# 换钉前实测过 keys/public-key.pem 的 sha256 仍是下面 DAEUNIV_KEY_SHA256（没换钥匙）
+DAEUNIV_SHA=e48b222f239e2572244c8cf495fbce79b0da7528
 #   honk/files/{honk.init,honk.config,config.dae}   → 装进 wrapper 包
 #   luci-app-honk/            依赖 +luci-lib-daeuniverse +honk
 #   luci-lib-daeuniverse/     依赖 +luci-base +jshn +flock +coreutils-timeout（含 po/ 中文）

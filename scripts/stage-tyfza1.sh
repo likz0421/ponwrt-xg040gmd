@@ -51,6 +51,8 @@ cp "$BASE" "$OUTCFG"
 	echo 'CONFIG_PACKAGE_flock=y'
 	echo 'CONFIG_PACKAGE_coreutils-timeout=y'
 	echo 'CONFIG_PACKAGE_luci-theme-lucent=y'
+	# 开机启用射频（不建 SSID）：上游只设 country，默认无线是关的
+	echo 'CONFIG_PACKAGE_ponwrt-wifi-on=y'
 } >> "$OUTCFG"
 # 先放到位，让后面的索引自检能跑（build.sh 里 sync-overlay 会用同一份内容再覆盖一次，幂等）
 cp "$OUTCFG" "$T/.config"
@@ -88,6 +90,18 @@ cp -a "$THEME_TMP" "$T/package/custom/luci-theme-lucent"
 rm -rf "$T/package/custom/luci-theme-lucent/.git" "$(dirname "$THEME_TMP")"
 echo "✅ 主题已放置 luci-theme-lucent @ ${THEME_SHA:0:7}"
 
+# ---------- 2b. 开机启用射频的小包（我们自己写的，不动上游）----------
+# 放 package/custom/ 和 honk/主题同一层；Makefile 里有 `call BuildPackage`
+# 扫描标记（缺了会被 include/scan.mk 静默跳过，这条踩过）。
+WIFIPKG="$CTRL/packages/ponwrt-wifi-on"
+[ -s "$WIFIPKG/Makefile" ] && [ -s "$WIFIPKG/files/etc/uci-defaults/99-ponwrt-enable-radio" ] || {
+	echo "::error::找不到 $WIFIPKG（Makefile 或 uci-defaults 脚本缺失）"; exit 1; }
+grep -q 'call BuildPackage' "$WIFIPKG/Makefile" || {
+	echo "::error::ponwrt-wifi-on 的 Makefile 缺 call BuildPackage 扫描标记"; exit 1; }
+rm -rf "$T/package/custom/ponwrt-wifi-on"
+cp -a "$WIFIPKG" "$T/package/custom/ponwrt-wifi-on"
+echo "✅ 已放置 ponwrt-wifi-on（首启启用射频，不建 SSID）"
+
 # ---------- 3. honk：复用与 XG 线完全同一套（同一 manifest、同一 wrapper）----------
 bash "$CTRL/scripts/stage-honk.sh" "$T"
 
@@ -95,5 +109,7 @@ bash "$CTRL/scripts/stage-honk.sh" "$T"
 cd "$T"
 grep -qx "Package: luci-theme-lucent" tmp/.packageinfo || {
 	echo "::error::luci-theme-lucent 没进 tmp/.packageinfo"; exit 1; }
-echo "✅ 索引确认: luci-theme-lucent"
-echo "✅ TYFZA1 注入完成（$OUTCFG + package/custom/{honk,luci-app-honk,luci-lib-daeuniverse,luci-theme-lucent}）"
+grep -qx "Package: ponwrt-wifi-on" tmp/.packageinfo || {
+	echo "::error::ponwrt-wifi-on 没进 tmp/.packageinfo"; exit 1; }
+echo "✅ 索引确认: luci-theme-lucent, ponwrt-wifi-on"
+echo "✅ TYFZA1 注入完成（$OUTCFG + package/custom/{honk,luci-app-honk,luci-lib-daeuniverse,luci-theme-lucent,ponwrt-wifi-on}）"
