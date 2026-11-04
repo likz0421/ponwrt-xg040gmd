@@ -141,6 +141,13 @@ jobs:
           # .config 就落回基线默认机型，答的自然是别人的内核配置。
           # 这里提前调同一条命令；它是幂等的（rsync --delete + 先 sed 删再 printf 追加），
           # 后面 build.sh 再执行一遍不会叠加。
+          # 修上游 bug：sync-overlay.sh:55 把 CONFIG_VERSION_REPO 写死成官方 snapshots，
+          # 用户要求稳定版 25.12.6、不要快照。只改本次 clone 的副本，不 fork 不改上游仓库。
+          SOV=port/scripts/sync-overlay.sh
+          grep -q 'downloads.openwrt.org/snapshots' "$SOV" || {
+            echo "::error::上游 sync-overlay.sh 里找不到 snapshots 硬编码（上游改了？需重新核对）"; exit 1; }
+          sed -i 's|https://downloads.openwrt.org/snapshots|https://downloads.openwrt.org/releases/25.12.6|g' "$SOV"
+          echo "已修上游源：$(grep -n 'CONFIG_VERSION_REPO' "$SOV")"
           sh port/scripts/sync-overlay.sh sources/openwrt > sync-overlay.log 2>&1 || {
             echo "::error::上游 sync-overlay 失败"; tail -30 sync-overlay.log; exit 1; }
           [ -d sources/openwrt/target/linux/rtl9617c ] \
