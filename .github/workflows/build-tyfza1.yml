@@ -716,7 +716,6 @@ jobs:
       # 这一步只出结论，不红作业：验过了下一轮才把源写进镜像。
       - name: Probe whether a third-party aarch64_generic index is usable
         run: |
-        run: |
           set -euo pipefail
           T="$TYFZA1_WORK/sources/openwrt"
           DEV_ARCH=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"$/\1/p' "$T/.config")
