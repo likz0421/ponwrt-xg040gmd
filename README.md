@@ -133,7 +133,7 @@ config KERNEL_DEBUG_INFO_BTF
 
 | 包 | 内容来源 | 说明 |
 |---|---|---|
-| `honk` | honk 官方 release 资产 `honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-full.tar.gz` | **静态链接 ELF**（内嵌 doona / doona-lite 面板），下载与 `PKG_HASH` 校验由 buildroot 做；hash 与 release 附带的 `SHA256SUMS` 逐字核对过 |
+| `honk` | honk 官方 release 资产 `honk-core-v0.1.0-beta.5-aarch64-unknown-linux-musl-full.tar.gz` | **静态链接 ELF**（内嵌 doona / doona-lite 面板），下载与 `PKG_HASH` 校验由 buildroot 做；hash 与 release 附带的 `SHA256SUMS` 逐字核对过 |
 | `honk` 的 `init/UCI/config.dae` | `daeuniverse/openwrt-packages@503cdb13` 的 `honk/files/` | 112 行 procd 脚本，自己处理 bpffs 与 cgroup memory 控制器 |
 | `luci-app-honk` / `luci-lib-daeuniverse` | 同一 feed 同一 SHA 的源码 | 后者带 `po/` 中文，依赖 `jshn` / `flock` / `coreutils-timeout` |
 

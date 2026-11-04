@@ -212,7 +212,9 @@ jobs:
 
       # ---------- 8. defconfig + 硬断言 ----------
       - name: make defconfig
-        run: cd "$WORK/openwrt" && make defconfig 2>&1 | tail -5
+        run: |
+          set -euo pipefail
+          cd "$WORK/openwrt" && make defconfig 2>&1 | tail -5
 
       - name: ASSERT configuration
         run: |
@@ -338,8 +340,15 @@ jobs:
       # ---------- 9. 下载 + 编译 ----------
       - name: Download packages
         run: |
+          set -euo pipefail
           cd "$WORK/openwrt"
-          for i in 1 2 3; do make download -j8 && break; sleep 5; done
+          ok=0
+          for i in 1 2 3; do
+            if make download -j8; then ok=1; break; fi
+            echo "::warning::make download 第 $i 次失败，5 秒后重试"
+            sleep 5
+          done
+          [ "$ok" = 1 ] || { echo "::error::make download 连跑 3 次都失败"; exit 1; }
           find dl -size -1024c -type f -delete 2>/dev/null || true
           echo "dl 文件数: $(ls -1 dl 2>/dev/null | wc -l)"
 
@@ -437,10 +446,19 @@ jobs:
           [ -n "$LUCI_OK" ] || echo "::warning::rootfs 里没找到 honk 的 LuCI menu.d 条目（界面可能进不去，检查 luci-app-honk 载荷）"
           RP=""
           for r in $ROOTS; do [ -s "$r/etc/apk/repositories.d/ponwrt.list" ] && { RP="$r"; break; }; done
+          [ -n "$RP" ] || { echo "::error::所有 rootfs 里都没有 ponwrt.list"; exit 1; }
           # 光"文件在"不够：内容必须是我们的源、distfeeds 不能有生效行、
           # 镜像里的公钥必须就是本次签名用的那把（否则 Pages 发了设备也认不到）
-          grep -qs "targets/airoha/an7581/packages/packages.adb" "$RP/etc/apk/repositories.d/ponwrt.list" \
-            || { echo "::error::镜像里的 ponwrt.list 没写自建源"; cat "$RP/etc/apk/repositories.d/ponwrt.list"; exit 1; }
+          # 必须锚定行首的生效源：publish_repo=false 时源行全被注释，
+          # 不带 ^ 的 grep 会命中注释行，让断言在关掉自建源时恒真。
+          if [ '${{ inputs.publish_repo }}' = 'true' ]; then
+            grep -qsE '^@ponwrt[[:space:]].*targets/airoha/an7581/packages/packages\.adb' \
+              "$RP/etc/apk/repositories.d/ponwrt.list" \
+              || { echo "::error::镜像里的 ponwrt.list 没有生效的自建源行"; cat "$RP/etc/apk/repositories.d/ponwrt.list"; exit 1; }
+          else
+            ! grep -qsE '^@ponwrt[[:space:]]' "$RP/etc/apk/repositories.d/ponwrt.list" \
+              || { echo "::error::publish_repo=false，但镜像里仍有生效的自建源行"; cat "$RP/etc/apk/repositories.d/ponwrt.list"; exit 1; }
+          fi
           NACT=$(awk '!/^#/ && NF>0 {n++} END{print n+0}' "$RP/etc/apk/repositories.d/distfeeds.list")
           [ "$NACT" = 0 ] || { echo "::error::distfeeds.list 里还有 $NACT 行生效源（官方 snapshots 没被覆盖掉）"; exit 1; }
           KEYHIT=""

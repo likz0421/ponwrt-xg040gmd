@@ -592,7 +592,8 @@ jobs:
           echo "  kmod-rtl-ax-ap 在：$WK"
           echo "  该 rootfs 里 WiFi 相关包：$(grep -oE '^P:[A-Za-z0-9._+-]+' "$WK/lib/apk/db/installed" | cut -c3- | grep -iE 'rtl|80211|wpad|wifi|regdb|^iw$' | tr '\n' ' ')"
           KO=$(find "$WK/lib/modules" -name 'rtl_ax_ap.ko*' 2>/dev/null | head -1)
-          [ -n "$KO" ] && echo "  驱动文件：$KO" || echo "::warning::rootfs 里没找到 rtl_ax_ap.ko（包记录了但文件没落地？检查 KernelPackage FILES）"
+          [ -n "$KO" ] || { echo "::error::rootfs 里没找到 rtl_ax_ap.ko（包记录了但文件没落地？检查 KernelPackage FILES）"; exit 1; }
+          echo "  驱动文件：$KO"
           echo "=== 3) 实体文件（同样按并集找）==="
           MISSBIN=""
           for f in usr/bin/honk-core etc/init.d/honk; do
@@ -712,7 +713,8 @@ jobs:
       # 用户投诉"大鹅在线更新永远显示最新"：TYFZA1 是 aarch64_cortex-a55，而
       # daeuniverse 只发 a53/a72/a76/aarch64_generic/x86_64 五个索引（实测 a55 路径 404），
       # 官方 snapshots 同样没有 a55。所以能不能吃 generic 索引，取决于设备声明的
-      # /etc/apk/arch 里有没有兼容项 —— 这我不猜，用镜像里的真实 arch 列表跑一遍 host apk。
+      # /etc/apk/arch 里有没有兼容项 —— 这条线仍用 host apk 沙箱给参考结论；
+      # 需要设备级证据请看 tyfza1-openwrt 仓库的 chroot+qemu 探针（apk-arch-probe.yml）。
       # 这一步只出结论，不红作业：验过了下一轮才把源写进镜像。
       - name: Probe whether a third-party aarch64_generic index is usable
         run: |
@@ -809,6 +811,8 @@ jobs:
           sh scripts/package_release.sh sources/openwrt artifacts/release
           ls -la artifacts/release
           (cd artifacts/release && sha256sum * 2>/dev/null | tee SHA256SUMS.local)
+          # latest.json 的 sha256sums_url 指向不带 .local 的正式资产名，这里真的产出同名文件。
+          (cd artifacts/release && cp SHA256SUMS.local SHA256SUMS)
 
       - name: Build stamp for the release text
         # 滚动 tag 的 published_at 永远停在首次发布那一刻，资产又是同名覆盖重建，
@@ -838,17 +842,18 @@ jobs:
             ## 本次构建（run ${{ github.run_id }}）
             - 时间：${{ env.BUILD_STAMP }}
             - `${{ env.IMG_NAME }}`：**${{ env.IMG_SIZE }} B**，sha256 `${{ env.IMG_SHA }}`
-            - WiFi 驱动：`/lib/modules/6.18.55/rtl_ax_ap.ko`（kmod-rtl-ax-ap 内含
+            - WiFi 驱动：`/lib/modules/*/rtl_ax_ap.ko`（kmod-rtl-ax-ap 内含
               cfg80211/mac80211/rtl_ax_ap 三个 .ko）必须在镜像里，成品断言会验。
             - 下面的资产每次构建都**同名覆盖重建**；滚动 tag 不改 published_at，
               所以卡片日期看着像旧的 —— 认新旧看这里的构建时间和 sha256。
 
             基座完全按上游：<https://github.com/LeoooChen/PonWRT-TYFZA1@${{ env.TYFZA1_SHA }}>
             （按 SHA 取，非 fork；其 sources.lock.json 锁的 openwrt commit + kernel 6.18.55）。
-            只额外加三样，且不改上游任何文件（用他们自己留的 TYFZA1_CONFIG 扩展点派生 config）：
+            只额外加四样，且不改上游任何文件（用他们自己留的 TYFZA1_CONFIG 扩展点派生 config）：
             1. 内核 BTF + honk 需要的 eBPF/TC 模块
             2. honk（daeuniverse）：官方 release 静态二进制包 + luci-app-honk + luci-lib-daeuniverse
             3. 主题 luci-theme-lucent（argon 仍在，按上游要求保留）
+            4. ponwrt-wifi-on：首启把射频 disabled 置 0，**不建 SSID、不设密码**
             设备 apk 源（本次构建自产，钥匙与 XG 那条线同一把）：
             <https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/tyfza1/targets/rtl9617c/generic/packages/packages.adb>
             —— 只有 `publish_repo=true` 才会发仓库并覆盖上游写死的官方 snapshots 源；
@@ -963,7 +968,7 @@ jobs:
           {
             echo "## TYFZA1 构建"
             echo "- 端口锁到 \`$TYFZA1_SHA\`"
-            echo "- 基座上游锁定 \`$TYFZA1_SHA\`；追加仅三项：BTF/eBPF、honk、luci-theme-lucent"
+            echo "- 基座上游锁定 \`$TYFZA1_SHA\`；追加四项：BTF/eBPF、honk、luci-theme-lucent、ponwrt-wifi-on"
             echo "- 产物 Release：<https://github.com/${GITHUB_REPOSITORY}/releases/tag/tyfza1-plus>"
             echo "- 构建后已断言：vmlinux 含 .BTF、rootfs apk 库含 honk 三件与主题"
           } >> "$GITHUB_STEP_SUMMARY"
